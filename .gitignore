@@ -1,0 +1,38 @@
+# Dependencies
+node_modules/
+
+# Build and test artifacts
+dist/
+coverage/
+.vitest/
+
+# Local environment files
+.env
+.env.*
+*.local
+
+# Private keys, credentials, tokens, and secrets
+*.pem
+*.key
+*.p8
+*.p12
+*.pfx
+id_rsa
+id_dsa
+id_ecdsa
+id_ed25519
+credentials/
+secrets/
+*.credentials
+*.secret
+*credentials*.json
+*secrets*.json
+*token*.json
+oauth*.json
+service-account*.json
+
+# Package manager logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
