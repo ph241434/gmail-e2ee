@@ -1,3 +1,22 @@
+
+## Status
+
+Phase 1 complete.
+
+Implemented:
+- AES-GCM message encryption
+- RSA-OAEP session-key wrapping
+- RSA-PSS sender signatures
+- deterministic message serialization
+- tamper/wrong-key failure handling
+- 9 automated tests
+
+Not yet implemented:
+- Gmail integration
+- browser extension APIs
+- persistent key storage
+- public-key identity verification
+
 # Gmail E2EE Crypto Proof of Concept
 
 This is an educational end-to-end encryption proof of concept intended to eventually integrate with Gmail. Phase 1 deliberately stays local: no Gmail integration, Google APIs, OAuth flow, extension APIs, key server, or persistent private-key storage.
