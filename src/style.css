@@ -54,6 +54,13 @@ label {
   color: #263241;
 }
 
+h2 {
+  margin: 0;
+  color: #151b24;
+  font-size: 1.35rem;
+  letter-spacing: 0;
+}
+
 textarea {
   width: 100%;
   min-height: 220px;
@@ -133,6 +140,60 @@ h1 {
 .status-text {
   color: #536172;
   font-size: 0.92rem;
+}
+
+.public-key-section {
+  margin-bottom: 22px;
+  padding: 18px 0 22px;
+  border-bottom: 1px solid #dce3ea;
+}
+
+.section-heading {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 24px;
+  margin-bottom: 14px;
+}
+
+.section-heading > p {
+  max-width: 360px;
+  margin: 0;
+  color: #536172;
+  font-size: 0.9rem;
+  text-align: right;
+}
+
+.public-key-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+}
+
+.public-key-input {
+  min-height: 210px;
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
+.button-row {
+  display: grid;
+  grid-template-columns: minmax(100px, 0.35fr) minmax(0, 1fr);
+  gap: 10px;
+}
+
+.panel .button-row button {
+  width: 100%;
+}
+
+button.secondary-button {
+  color: #2a2f36;
+  background: #e8edf2;
+}
+
+button.secondary-button:hover:not(:disabled) {
+  background: #d7e0e8;
 }
 
 .workspace-grid {
@@ -217,7 +278,8 @@ output {
 }
 
 @media (max-width: 960px) {
-  .workspace-grid {
+  .workspace-grid,
+  .public-key-grid {
     grid-template-columns: 1fr;
   }
 }
@@ -232,6 +294,16 @@ output {
     align-items: stretch;
     flex-direction: column;
     gap: 16px;
+  }
+
+  .section-heading {
+    align-items: start;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .section-heading > p {
+    text-align: left;
   }
 
   .field-list div {
