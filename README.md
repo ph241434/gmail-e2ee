@@ -1,7 +1,7 @@
 
 ## Status
 
-Phase 1 complete.
+Phase 1 complete. Phase 2 public-key import/export complete.
 
 Implemented:
 - AES-GCM message encryption
@@ -9,7 +9,8 @@ Implemented:
 - RSA-PSS sender signatures
 - deterministic message serialization
 - tamper/wrong-key failure handling
-- 9 automated tests
+- SPKI public-key import/export using PEM text
+- 19 automated tests
 
 Not yet implemented:
 - Gmail integration
@@ -21,7 +22,7 @@ Not yet implemented:
 
 [![CI](https://github.com/ph241434/gmail-e2ee/actions/workflows/ci.yml/badge.svg)](https://github.com/ph241434/gmail-e2ee/actions/workflows/ci.yml)
 
-This is an educational end-to-end encryption proof of concept intended to eventually integrate with Gmail. Phase 1 deliberately stays local: no Gmail integration, Google APIs, OAuth flow, extension APIs, key server, or persistent private-key storage.
+This is an educational end-to-end encryption proof of concept intended to eventually integrate with Gmail. The project deliberately stays local: no Gmail integration, Google APIs, OAuth flow, extension APIs, key server, or persistent private-key storage.
 
 The goal is to prove the core cryptographic flow:
 
@@ -67,6 +68,17 @@ On decrypt:
 
 The project never implements AES, RSA, hashing, or randomness manually.
 
+## Public Key Sharing
+
+Alice's public encryption key and Pavel's public signature-verification key can be exported and imported as standard SPKI public keys. SPKI bytes are Base64-encoded between `BEGIN PUBLIC KEY` and `END PUBLIC KEY` PEM markers so the keys can be shared as text.
+
+Imports assign the key's application role explicitly instead of trusting the serialized data to select it:
+
+- Recipient encryption keys import as RSA-OAEP with SHA-256 and only `wrapKey` usage.
+- Sender verification keys import as RSA-PSS with SHA-256 and only `verify` usage.
+
+Private keys are never exported. They remain non-extractable and live only in browser memory. Importing a public key proves only that the text is valid key material; it does not verify who owns the key.
+
 ## Message Format
 
 Encrypted messages use version `1`:
@@ -109,9 +121,11 @@ This does not automatically hide:
 
 - This is an educational project, not production cryptographic software.
 - Cryptographic primitives are provided by Web Crypto; custom cryptographic algorithms are intentionally avoided.
-- Private keys only live in browser memory for Phase 1.
+- Private keys only live in browser memory.
+- Private keys are non-extractable and are not included in public-key export.
 - Secure long-term private-key storage has not been implemented.
 - Public-key identity verification and trust management have not been implemented.
+- Importing a public key does not establish its owner's identity.
 - Gmail integration has not been implemented.
 - Browser-extension APIs have not been implemented.
 
@@ -129,8 +143,9 @@ npm run dev
 Open the Vite URL and use:
 
 1. Generate Demo Keys
-2. Encrypt
-3. Decrypt
+2. Copy the shareable Alice and Pavel public-key PEM values, or paste and import public keys for those roles.
+3. Encrypt
+4. Decrypt
 
 The default sender message is `Meet me at 4 PM.` Empty messages are allowed and tested.
 
@@ -142,6 +157,7 @@ src/
     aes.ts
     encoding.ts
     keyGeneration.ts
+    publicKeySerialization.ts
     rsaEncryption.ts
     signatures.ts
   message/
@@ -152,11 +168,11 @@ src/
   style.css
 tests/
   crypto.test.ts
+  publicKeySerialization.test.ts
 ```
 
 ## Phase 2 Candidates
 
-- Import/export public keys in a shareable format.
 - Add local private-key persistence with a serious protection model.
 - Add public-key identity verification and trust UX.
 - Define how encrypted subjects and metadata should work.

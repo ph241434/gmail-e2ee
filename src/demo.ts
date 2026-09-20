@@ -3,6 +3,12 @@ import {
   generateSenderSigningKeyPair
 } from "./crypto/keyGeneration";
 import {
+  exportRecipientEncryptionPublicKey,
+  exportSenderSigningPublicKey,
+  importRecipientEncryptionPublicKey,
+  importSenderSigningPublicKey
+} from "./crypto/publicKeySerialization";
+import {
   decryptMessage,
   encryptMessage,
   type EncryptedMessage
@@ -11,6 +17,11 @@ import {
 export interface DemoKeys {
   aliceEncryptionKeyPair: CryptoKeyPair;
   pavelSigningKeyPair: CryptoKeyPair;
+}
+
+export interface ExportedDemoPublicKeys {
+  aliceEncryptionPublicKey: string;
+  pavelVerificationPublicKey: string;
 }
 
 export async function generateDemoKeys(): Promise<DemoKeys> {
@@ -23,6 +34,28 @@ export async function generateDemoKeys(): Promise<DemoKeys> {
     aliceEncryptionKeyPair,
     pavelSigningKeyPair
   };
+}
+
+export async function exportDemoPublicKeys(
+  demoKeys: DemoKeys
+): Promise<ExportedDemoPublicKeys> {
+  const [aliceEncryptionPublicKey, pavelVerificationPublicKey] = await Promise.all([
+    exportRecipientEncryptionPublicKey(demoKeys.aliceEncryptionKeyPair.publicKey),
+    exportSenderSigningPublicKey(demoKeys.pavelSigningKeyPair.publicKey)
+  ]);
+
+  return {
+    aliceEncryptionPublicKey,
+    pavelVerificationPublicKey
+  };
+}
+
+export function importDemoRecipientPublicKey(pem: string): Promise<CryptoKey> {
+  return importRecipientEncryptionPublicKey(pem);
+}
+
+export function importDemoSenderPublicKey(pem: string): Promise<CryptoKey> {
+  return importSenderSigningPublicKey(pem);
 }
 
 export function formatEncryptedMessage(message: EncryptedMessage): string {
@@ -47,22 +80,24 @@ export function parseEncryptedMessage(value: string): EncryptedMessage {
 
 export async function encryptDemoMessage(
   plaintext: string,
-  demoKeys: DemoKeys
+  demoKeys: DemoKeys,
+  recipientPublicKey: CryptoKey = demoKeys.aliceEncryptionKeyPair.publicKey
 ): Promise<EncryptedMessage> {
   return encryptMessage(
     plaintext,
-    demoKeys.aliceEncryptionKeyPair.publicKey,
+    recipientPublicKey,
     demoKeys.pavelSigningKeyPair.privateKey
   );
 }
 
 export async function decryptDemoMessage(
   encryptedMessage: EncryptedMessage,
-  demoKeys: DemoKeys
+  demoKeys: DemoKeys,
+  senderVerificationPublicKey: CryptoKey = demoKeys.pavelSigningKeyPair.publicKey
 ): Promise<string> {
   return decryptMessage(
     encryptedMessage,
     demoKeys.aliceEncryptionKeyPair.privateKey,
-    demoKeys.pavelSigningKeyPair.publicKey
+    senderVerificationPublicKey
   );
 }
