@@ -19,6 +19,8 @@ Not yet implemented:
 
 # Gmail E2EE Crypto Proof of Concept
 
+[![CI](https://github.com/ph241434/gmail-e2ee/actions/workflows/ci.yml/badge.svg)](https://github.com/ph241434/gmail-e2ee/actions/workflows/ci.yml)
+
 This is an educational end-to-end encryption proof of concept intended to eventually integrate with Gmail. Phase 1 deliberately stays local: no Gmail integration, Google APIs, OAuth flow, extension APIs, key server, or persistent private-key storage.
 
 The goal is to prove the core cryptographic flow:
