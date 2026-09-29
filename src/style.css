@@ -177,6 +177,71 @@ h1 {
   line-height: 1.45;
 }
 
+.fingerprint-block {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid #dce3ea;
+}
+
+.fingerprint-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+  color: #273443;
+  font-size: 0.82rem;
+  font-weight: 800;
+}
+
+.fingerprint-value {
+  display: block;
+  min-height: 58px;
+  padding: 10px;
+  border: 1px solid #dce3ea;
+  border-radius: 6px;
+  color: #263241;
+  background: #f7f9fb;
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 0.76rem;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.trust-status {
+  flex: none;
+  color: #8a421f;
+  font-weight: 800;
+}
+
+.trust-status.is-verified {
+  color: #19583e;
+}
+
+label.trust-checkbox {
+  display: flex;
+  align-items: start;
+  gap: 9px;
+  margin: 10px 0 0;
+  color: #536172;
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.trust-checkbox input {
+  width: 18px;
+  height: 18px;
+  flex: none;
+  margin: 1px 0 0;
+  accent-color: #176b87;
+}
+
+.trust-checkbox:has(input:disabled) {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
 .button-row {
   display: grid;
   grid-template-columns: minmax(100px, 0.35fr) minmax(0, 1fr);
@@ -304,6 +369,12 @@ output {
 
   .section-heading > p {
     text-align: left;
+  }
+
+  .fingerprint-heading {
+    align-items: start;
+    flex-direction: column;
+    gap: 4px;
   }
 
   .field-list div {

@@ -3,6 +3,8 @@ import {
   decryptDemoMessage,
   encryptDemoMessage,
   exportDemoPublicKeys,
+  fingerprintDemoPublicKey,
+  fingerprintDemoPublicKeys,
   formatEncryptedMessage,
   generateDemoKeys,
   importDemoRecipientPublicKey,
@@ -10,10 +12,21 @@ import {
   parseEncryptedMessage,
   type DemoKeys
 } from "./demo";
+import {
+  createUnverifiedPublicKeyTrust,
+  isPublicKeyVerified,
+  markPublicKeyUnverified,
+  markPublicKeyVerified,
+  type SessionPublicKeyTrust
+} from "./trust/publicKeyTrust";
 
 let demoKeys: DemoKeys | undefined;
 let recipientEncryptionPublicKey: CryptoKey | undefined;
 let senderVerificationPublicKey: CryptoKey | undefined;
+let recipientFingerprint: string | undefined;
+let senderFingerprint: string | undefined;
+let recipientTrust: SessionPublicKeyTrust | undefined;
+let senderTrust: SessionPublicKeyTrust | undefined;
 
 const app = document.querySelector<HTMLDivElement>("#app");
 
@@ -49,6 +62,17 @@ app.innerHTML = `
         <div class="panel">
           <label for="alice-public-key">Alice's public encryption key</label>
           <textarea id="alice-public-key" class="public-key-input" spellcheck="false" placeholder="Generate keys or paste an RSA-OAEP public key in PEM format"></textarea>
+          <div class="fingerprint-block">
+            <div class="fingerprint-heading">
+              <span>SHA-256 fingerprint</span>
+              <span id="alice-trust-status" class="trust-status">Unverified</span>
+            </div>
+            <code id="alice-fingerprint" class="fingerprint-value">Generate or import a key</code>
+            <label class="trust-checkbox" for="verify-alice-key">
+              <input id="verify-alice-key" type="checkbox" disabled>
+              <span>I compared this fingerprint with Alice through a separate trusted channel.</span>
+            </label>
+          </div>
           <div class="button-row">
             <button id="copy-alice-key" class="secondary-button" type="button" disabled>Copy</button>
             <button id="import-alice-key" type="button" disabled>Import for encryption</button>
@@ -58,6 +82,17 @@ app.innerHTML = `
         <div class="panel">
           <label for="pavel-public-key">Pavel's public signature-verification key</label>
           <textarea id="pavel-public-key" class="public-key-input" spellcheck="false" placeholder="Generate keys or paste an RSA-PSS public key in PEM format"></textarea>
+          <div class="fingerprint-block">
+            <div class="fingerprint-heading">
+              <span>SHA-256 fingerprint</span>
+              <span id="pavel-trust-status" class="trust-status">Unverified</span>
+            </div>
+            <code id="pavel-fingerprint" class="fingerprint-value">Generate or import a key</code>
+            <label class="trust-checkbox" for="verify-pavel-key">
+              <input id="verify-pavel-key" type="checkbox" disabled>
+              <span>I compared this fingerprint with Pavel through a separate trusted channel.</span>
+            </label>
+          </div>
           <div class="button-row">
             <button id="copy-pavel-key" class="secondary-button" type="button" disabled>Copy</button>
             <button id="import-pavel-key" type="button" disabled>Import for verification</button>
@@ -116,10 +151,16 @@ const copyAliceKeyButton = getElement<HTMLButtonElement>("copy-alice-key");
 const importAliceKeyButton = getElement<HTMLButtonElement>("import-alice-key");
 const copyPavelKeyButton = getElement<HTMLButtonElement>("copy-pavel-key");
 const importPavelKeyButton = getElement<HTMLButtonElement>("import-pavel-key");
+const verifyAliceKeyCheckbox = getElement<HTMLInputElement>("verify-alice-key");
+const verifyPavelKeyCheckbox = getElement<HTMLInputElement>("verify-pavel-key");
 const plaintextInput = getElement<HTMLTextAreaElement>("plaintext");
 const encryptedPackageInput = getElement<HTMLTextAreaElement>("encrypted-package");
 const alicePublicKeyInput = getElement<HTMLTextAreaElement>("alice-public-key");
 const pavelPublicKeyInput = getElement<HTMLTextAreaElement>("pavel-public-key");
+const aliceFingerprintOutput = getElement<HTMLElement>("alice-fingerprint");
+const pavelFingerprintOutput = getElement<HTMLElement>("pavel-fingerprint");
+const aliceTrustStatus = getElement<HTMLSpanElement>("alice-trust-status");
+const pavelTrustStatus = getElement<HTMLSpanElement>("pavel-trust-status");
 const decryptedMessageOutput = getElement<HTMLOutputElement>("decrypted-message");
 const keyStatus = getElement<HTMLSpanElement>("key-status");
 const operationStatus = getElement<HTMLSpanElement>("operation-status");
@@ -129,15 +170,20 @@ generateKeysButton.addEventListener("click", async () => {
 
   try {
     demoKeys = await generateDemoKeys();
-    const exportedPublicKeys = await exportDemoPublicKeys(demoKeys);
+    const [exportedPublicKeys, fingerprints] = await Promise.all([
+      exportDemoPublicKeys(demoKeys),
+      fingerprintDemoPublicKeys(demoKeys)
+    ]);
     recipientEncryptionPublicKey = demoKeys.aliceEncryptionKeyPair.publicKey;
     senderVerificationPublicKey = demoKeys.pavelSigningKeyPair.publicKey;
+    setRecipientFingerprint(fingerprints.aliceEncryptionFingerprint);
+    setSenderFingerprint(fingerprints.pavelVerificationFingerprint);
     alicePublicKeyInput.value = exportedPublicKeys.aliceEncryptionPublicKey;
     pavelPublicKeyInput.value = exportedPublicKeys.pavelVerificationPublicKey;
     keyStatus.textContent = "Demo keys ready";
     keyStatus.classList.add("is-ready");
     updateControlStates();
-    setStatus("Keys generated in browser memory. Public keys are ready to share.");
+    setStatus("Keys generated. Compare both fingerprints before using them.");
   } catch (error) {
     setStatus(formatError(error));
   } finally {
@@ -146,8 +192,12 @@ generateKeysButton.addEventListener("click", async () => {
 });
 
 encryptButton.addEventListener("click", async () => {
-  if (!demoKeys || !recipientEncryptionPublicKey) {
-    setStatus("Generate demo keys and select a recipient public key first.");
+  if (
+    !demoKeys ||
+    !recipientEncryptionPublicKey ||
+    !isPublicKeyVerified(recipientTrust, recipientFingerprint)
+  ) {
+    setStatus("Verify Alice's current fingerprint before encrypting.");
     return;
   }
 
@@ -172,8 +222,12 @@ encryptButton.addEventListener("click", async () => {
 });
 
 decryptButton.addEventListener("click", async () => {
-  if (!demoKeys || !senderVerificationPublicKey) {
-    setStatus("Generate demo keys and select a sender verification key first.");
+  if (
+    !demoKeys ||
+    !senderVerificationPublicKey ||
+    !isPublicKeyVerified(senderTrust, senderFingerprint)
+  ) {
+    setStatus("Verify Pavel's current fingerprint before decrypting.");
     return;
   }
 
@@ -214,11 +268,13 @@ encryptedPackageInput.addEventListener("input", () => {
 
 alicePublicKeyInput.addEventListener("input", () => {
   recipientEncryptionPublicKey = undefined;
+  clearRecipientFingerprint();
   updateControlStates();
 });
 
 pavelPublicKeyInput.addEventListener("input", () => {
   senderVerificationPublicKey = undefined;
+  clearSenderFingerprint();
   updateControlStates();
 });
 
@@ -234,10 +290,13 @@ importAliceKeyButton.addEventListener("click", async () => {
   setBusy(true, "Importing Alice's public encryption key...");
 
   try {
-    recipientEncryptionPublicKey = await importDemoRecipientPublicKey(
+    const importedKey = await importDemoRecipientPublicKey(
       alicePublicKeyInput.value
     );
-    setStatus("Alice's RSA-OAEP public key imported for encryption.");
+    const fingerprint = await fingerprintDemoPublicKey(importedKey);
+    recipientEncryptionPublicKey = importedKey;
+    setRecipientFingerprint(fingerprint);
+    setStatus("Alice's key imported. Compare its fingerprint before encryption.");
   } catch (error) {
     setStatus(formatError(error));
   } finally {
@@ -249,15 +308,54 @@ importPavelKeyButton.addEventListener("click", async () => {
   setBusy(true, "Importing Pavel's public verification key...");
 
   try {
-    senderVerificationPublicKey = await importDemoSenderPublicKey(
+    const importedKey = await importDemoSenderPublicKey(
       pavelPublicKeyInput.value
     );
-    setStatus("Pavel's RSA-PSS public key imported for verification.");
+    const fingerprint = await fingerprintDemoPublicKey(importedKey);
+    senderVerificationPublicKey = importedKey;
+    setSenderFingerprint(fingerprint);
+    setStatus("Pavel's key imported. Compare its fingerprint before verification.");
   } catch (error) {
     setStatus(formatError(error));
   } finally {
     setBusy(false);
   }
+});
+
+verifyAliceKeyCheckbox.addEventListener("change", () => {
+  if (!recipientTrust) {
+    verifyAliceKeyCheckbox.checked = false;
+    return;
+  }
+
+  recipientTrust = verifyAliceKeyCheckbox.checked
+    ? markPublicKeyVerified(recipientTrust)
+    : markPublicKeyUnverified(recipientTrust);
+  renderTrustStatus();
+  updateControlStates();
+  setStatus(
+    verifyAliceKeyCheckbox.checked
+      ? "Alice's fingerprint marked verified for this session."
+      : "Alice's fingerprint verification cleared."
+  );
+});
+
+verifyPavelKeyCheckbox.addEventListener("change", () => {
+  if (!senderTrust) {
+    verifyPavelKeyCheckbox.checked = false;
+    return;
+  }
+
+  senderTrust = verifyPavelKeyCheckbox.checked
+    ? markPublicKeyVerified(senderTrust)
+    : markPublicKeyUnverified(senderTrust);
+  renderTrustStatus();
+  updateControlStates();
+  setStatus(
+    verifyPavelKeyCheckbox.checked
+      ? "Pavel's fingerprint marked verified for this session."
+      : "Pavel's fingerprint verification cleared."
+  );
 });
 
 function getElement<T extends HTMLElement>(id: string): T {
@@ -272,11 +370,16 @@ function getElement<T extends HTMLElement>(id: string): T {
 
 function setBusy(isBusy: boolean, message?: string): void {
   generateKeysButton.disabled = isBusy;
-  encryptButton.disabled = isBusy || !demoKeys || !recipientEncryptionPublicKey;
+  encryptButton.disabled =
+    isBusy ||
+    !demoKeys ||
+    !recipientEncryptionPublicKey ||
+    !isPublicKeyVerified(recipientTrust, recipientFingerprint);
   decryptButton.disabled =
     isBusy ||
     !demoKeys ||
     !senderVerificationPublicKey ||
+    !isPublicKeyVerified(senderTrust, senderFingerprint) ||
     encryptedPackageInput.value.trim().length === 0;
   tamperCiphertextButton.disabled =
     isBusy || encryptedPackageInput.value.trim().length === 0;
@@ -284,10 +387,60 @@ function setBusy(isBusy: boolean, message?: string): void {
   importAliceKeyButton.disabled = isBusy || alicePublicKeyInput.value.trim().length === 0;
   copyPavelKeyButton.disabled = isBusy || pavelPublicKeyInput.value.trim().length === 0;
   importPavelKeyButton.disabled = isBusy || pavelPublicKeyInput.value.trim().length === 0;
+  verifyAliceKeyCheckbox.disabled = isBusy || !recipientTrust;
+  verifyPavelKeyCheckbox.disabled = isBusy || !senderTrust;
 
   if (message) {
     setStatus(message);
   }
+}
+
+function setRecipientFingerprint(fingerprint: string): void {
+  recipientFingerprint = fingerprint;
+  recipientTrust = createUnverifiedPublicKeyTrust(fingerprint);
+  aliceFingerprintOutput.textContent = fingerprint;
+  verifyAliceKeyCheckbox.checked = false;
+  renderTrustStatus();
+}
+
+function setSenderFingerprint(fingerprint: string): void {
+  senderFingerprint = fingerprint;
+  senderTrust = createUnverifiedPublicKeyTrust(fingerprint);
+  pavelFingerprintOutput.textContent = fingerprint;
+  verifyPavelKeyCheckbox.checked = false;
+  renderTrustStatus();
+}
+
+function clearRecipientFingerprint(): void {
+  recipientFingerprint = undefined;
+  recipientTrust = undefined;
+  aliceFingerprintOutput.textContent = "Import this key to calculate its fingerprint";
+  verifyAliceKeyCheckbox.checked = false;
+  renderTrustStatus();
+}
+
+function clearSenderFingerprint(): void {
+  senderFingerprint = undefined;
+  senderTrust = undefined;
+  pavelFingerprintOutput.textContent = "Import this key to calculate its fingerprint";
+  verifyPavelKeyCheckbox.checked = false;
+  renderTrustStatus();
+}
+
+function renderTrustStatus(): void {
+  renderOneTrustStatus(
+    aliceTrustStatus,
+    isPublicKeyVerified(recipientTrust, recipientFingerprint)
+  );
+  renderOneTrustStatus(
+    pavelTrustStatus,
+    isPublicKeyVerified(senderTrust, senderFingerprint)
+  );
+}
+
+function renderOneTrustStatus(element: HTMLElement, isVerified: boolean): void {
+  element.textContent = isVerified ? "Verified this session" : "Unverified";
+  element.classList.toggle("is-verified", isVerified);
 }
 
 function updateControlStates(): void {
