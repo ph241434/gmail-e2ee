@@ -2,6 +2,7 @@ import {
   generateRecipientEncryptionKeyPair,
   generateSenderSigningKeyPair
 } from "./crypto/keyGeneration";
+import { fingerprintPublicKey } from "./crypto/publicKeyFingerprint";
 import {
   exportRecipientEncryptionPublicKey,
   exportSenderSigningPublicKey,
@@ -22,6 +23,11 @@ export interface DemoKeys {
 export interface ExportedDemoPublicKeys {
   aliceEncryptionPublicKey: string;
   pavelVerificationPublicKey: string;
+}
+
+export interface DemoPublicKeyFingerprints {
+  aliceEncryptionFingerprint: string;
+  pavelVerificationFingerprint: string;
 }
 
 export async function generateDemoKeys(): Promise<DemoKeys> {
@@ -48,6 +54,25 @@ export async function exportDemoPublicKeys(
     aliceEncryptionPublicKey,
     pavelVerificationPublicKey
   };
+}
+
+export async function fingerprintDemoPublicKeys(
+  demoKeys: DemoKeys
+): Promise<DemoPublicKeyFingerprints> {
+  const [aliceEncryptionFingerprint, pavelVerificationFingerprint] =
+    await Promise.all([
+      fingerprintPublicKey(demoKeys.aliceEncryptionKeyPair.publicKey),
+      fingerprintPublicKey(demoKeys.pavelSigningKeyPair.publicKey)
+    ]);
+
+  return {
+    aliceEncryptionFingerprint,
+    pavelVerificationFingerprint
+  };
+}
+
+export function fingerprintDemoPublicKey(publicKey: CryptoKey): Promise<string> {
+  return fingerprintPublicKey(publicKey);
 }
 
 export function importDemoRecipientPublicKey(pem: string): Promise<CryptoKey> {

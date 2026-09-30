@@ -1,7 +1,7 @@
 
 ## Status
 
-Phase 1 complete. Phase 2 public-key import/export complete.
+Phase 1 complete. Phase 2 public-key import/export and fingerprint verification complete.
 
 Implemented:
 - AES-GCM message encryption
@@ -10,13 +10,14 @@ Implemented:
 - deterministic message serialization
 - tamper/wrong-key failure handling
 - SPKI public-key import/export using PEM text
-- 19 automated tests
+- SHA-256 public-key fingerprints with session-only verification state
+- 29 automated tests
 
 Not yet implemented:
 - Gmail integration
 - browser extension APIs
 - persistent key storage
-- public-key identity verification
+- persistent contact and trust storage
 
 # Gmail E2EE Crypto Proof of Concept
 
@@ -79,6 +80,19 @@ Imports assign the key's application role explicitly instead of trusting the ser
 
 Private keys are never exported. They remain non-extractable and live only in browser memory. Importing a public key proves only that the text is valid key material; it does not verify who owns the key.
 
+## Fingerprints and Session Trust
+
+The app derives each public-key fingerprint by hashing its canonical SPKI bytes with SHA-256. Fingerprints are displayed as 32 uppercase, colon-separated hexadecimal bytes so they can be compared through a separate trusted channel such as an in-person conversation or an established call.
+
+The local demo requires an explicit fingerprint-comparison acknowledgment before an Alice key can encrypt or a Pavel key can verify signatures. That verification state:
+
+- is tied to the exact fingerprint
+- resets whenever the corresponding PEM text changes or another key is imported
+- exists only in browser memory for the current session
+- is not saved as a contact or durable identity assertion
+
+A matching fingerprint can support identity verification only when the comparison channel itself is trustworthy. The application cannot determine key ownership automatically.
+
 ## Message Format
 
 Encrypted messages use version `1`:
@@ -124,8 +138,9 @@ This does not automatically hide:
 - Private keys only live in browser memory.
 - Private keys are non-extractable and are not included in public-key export.
 - Secure long-term private-key storage has not been implemented.
-- Public-key identity verification and trust management have not been implemented.
-- Importing a public key does not establish its owner's identity.
+- Fingerprint verification depends on a separate trusted comparison channel.
+- Verified status is session-only; persistent contact and trust management have not been implemented.
+- Importing a key or viewing its fingerprint alone does not establish its owner's identity.
 - Gmail integration has not been implemented.
 - Browser-extension APIs have not been implemented.
 
@@ -144,8 +159,9 @@ Open the Vite URL and use:
 
 1. Generate Demo Keys
 2. Copy the shareable Alice and Pavel public-key PEM values, or paste and import public keys for those roles.
-3. Encrypt
-4. Decrypt
+3. Compare each SHA-256 fingerprint through a separate trusted channel and acknowledge the match.
+4. Encrypt
+5. Decrypt
 
 The default sender message is `Meet me at 4 PM.` Empty messages are allowed and tested.
 
@@ -157,6 +173,7 @@ src/
     aes.ts
     encoding.ts
     keyGeneration.ts
+    publicKeyFingerprint.ts
     publicKeySerialization.ts
     rsaEncryption.ts
     signatures.ts
@@ -166,14 +183,17 @@ src/
   demo.ts
   main.ts
   style.css
+  trust/
+    publicKeyTrust.ts
 tests/
   crypto.test.ts
+  publicKeyFingerprint.test.ts
   publicKeySerialization.test.ts
 ```
 
 ## Phase 2 Candidates
 
 - Add local private-key persistence with a serious protection model.
-- Add public-key identity verification and trust UX.
+- Add persistent contact and trust storage with explicit key-change handling.
 - Define how encrypted subjects and metadata should work.
 - Begin browser-extension architecture planning without touching Gmail yet.
