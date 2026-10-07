@@ -4,6 +4,11 @@ import {
 } from "./crypto/keyGeneration";
 import { fingerprintPublicKey } from "./crypto/publicKeyFingerprint";
 import {
+  createPrivateKeyVault,
+  unlockPrivateKeyVault,
+  type PrivateKeyVault
+} from "./crypto/privateKeyVault";
+import {
   exportRecipientEncryptionPublicKey,
   exportSenderSigningPublicKey,
   importRecipientEncryptionPublicKey,
@@ -30,6 +35,11 @@ export interface DemoPublicKeyFingerprints {
   pavelVerificationFingerprint: string;
 }
 
+export interface CreatedDemoKeyVault {
+  vault: PrivateKeyVault;
+  demoKeys: DemoKeys;
+}
+
 export async function generateDemoKeys(): Promise<DemoKeys> {
   const [aliceEncryptionKeyPair, pavelSigningKeyPair] = await Promise.all([
     generateRecipientEncryptionKeyPair(),
@@ -39,6 +49,32 @@ export async function generateDemoKeys(): Promise<DemoKeys> {
   return {
     aliceEncryptionKeyPair,
     pavelSigningKeyPair
+  };
+}
+
+export async function createDemoKeyVault(
+  passphrase: string
+): Promise<CreatedDemoKeyVault> {
+  const { vault, keys } = await createPrivateKeyVault(passphrase);
+
+  return {
+    vault,
+    demoKeys: {
+      aliceEncryptionKeyPair: keys.recipientEncryptionKeyPair,
+      pavelSigningKeyPair: keys.senderSigningKeyPair
+    }
+  };
+}
+
+export async function unlockDemoKeyVault(
+  vault: unknown,
+  passphrase: string
+): Promise<DemoKeys> {
+  const keys = await unlockPrivateKeyVault(vault, passphrase);
+
+  return {
+    aliceEncryptionKeyPair: keys.recipientEncryptionKeyPair,
+    pavelSigningKeyPair: keys.senderSigningKeyPair
   };
 }
 

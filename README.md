@@ -1,7 +1,10 @@
+# Gmail E2EE Crypto Proof of Concept
+
+[![CI](https://github.com/ph241434/gmail-e2ee/actions/workflows/ci.yml/badge.svg)](https://github.com/ph241434/gmail-e2ee/actions/workflows/ci.yml)
 
 ## Status
 
-Phase 1 complete. Phase 2 public-key import/export and fingerprint verification complete.
+Phase 1 complete. Phase 2 public-key verification and encrypted local private-key persistence complete.
 
 Implemented:
 - AES-GCM message encryption
@@ -11,19 +14,15 @@ Implemented:
 - tamper/wrong-key failure handling
 - SPKI public-key import/export using PEM text
 - SHA-256 public-key fingerprints with session-only verification state
-- 29 automated tests
+- passphrase-protected private-key persistence in IndexedDB
+- 44 automated tests
 
 Not yet implemented:
 - Gmail integration
 - browser extension APIs
-- persistent key storage
 - persistent contact and trust storage
 
-# Gmail E2EE Crypto Proof of Concept
-
-[![CI](https://github.com/ph241434/gmail-e2ee/actions/workflows/ci.yml/badge.svg)](https://github.com/ph241434/gmail-e2ee/actions/workflows/ci.yml)
-
-This is an educational end-to-end encryption proof of concept intended to eventually integrate with Gmail. The project deliberately stays local: no Gmail integration, Google APIs, OAuth flow, extension APIs, key server, or persistent private-key storage.
+This is an educational end-to-end encryption proof of concept intended to eventually integrate with Gmail. The project deliberately stays local: no Gmail integration, Google APIs, OAuth flow, extension APIs, or key server.
 
 The goal is to prove the core cryptographic flow:
 
@@ -78,7 +77,24 @@ Imports assign the key's application role explicitly instead of trusting the ser
 - Recipient encryption keys import as RSA-OAEP with SHA-256 and only `wrapKey` usage.
 - Sender verification keys import as RSA-PSS with SHA-256 and only `verify` usage.
 
-Private keys are never exported. They remain non-extractable and live only in browser memory. Importing a public key proves only that the text is valid key material; it does not verify who owns the key.
+Public-key import does not expose private-key material. Importing a public key proves only that the text is valid key material; it does not verify who owns the key.
+
+## Local Private-Key Vault
+
+The optional local vault persists encrypted private keys in IndexedDB for this browser origin. It never stores the vault passphrase.
+
+When a vault is created:
+
+1. Web Crypto generates the two RSA key pairs as extractable only for the wrapping operation.
+2. PBKDF2-HMAC-SHA-256 derives an AES-256-GCM wrapping key from the passphrase, a fresh 128-bit salt, and 600,000 iterations.
+3. Web Crypto `wrapKey()` encrypts each PKCS#8 private key with a separate fresh 96-bit AES-GCM IV.
+4. AES-GCM additional authenticated data binds each wrapped key to the vault version, its application role, and its public-key fingerprint.
+5. Only the versioned encrypted vault, public keys, fingerprints, salt, IVs, and KDF metadata are written to IndexedDB.
+6. The application receives newly unwrapped private keys that are non-extractable and restricted to `unwrapKey` or `sign` usage.
+
+Unlock validates the vault structure and public-key fingerprints before unwrapping. A wrong passphrase, altered wrapped key, substituted public key, or swapped role record produces the same generic unlock failure. Creating a new vault replaces the single saved vault only after the new encrypted value is ready.
+
+The passphrase policy requires 12 to 1,024 characters. The minimum is a guardrail, not a measure of passphrase strength or a recovery mechanism.
 
 ## Fingerprints and Session Trust
 
@@ -135,9 +151,13 @@ This does not automatically hide:
 
 - This is an educational project, not production cryptographic software.
 - Cryptographic primitives are provided by Web Crypto; custom cryptographic algorithms are intentionally avoided.
-- Private keys only live in browser memory.
-- Private keys are non-extractable and are not included in public-key export.
-- Secure long-term private-key storage has not been implemented.
+- Vault private keys are encrypted at rest, but an attacker who can run code in this origin while the vault is unlocked may still use them.
+- Vault creation temporarily requires extractable Web Crypto keys so `wrapKey()` can protect their PKCS#8 representation. Extractable private keys are not returned to the application or stored.
+- Unlocked private keys are non-extractable and are not included in public-key export.
+- PBKDF2 slows passphrase guessing but cannot make a weak passphrase strong.
+- There is no passphrase recovery, key backup, migration, or multi-device synchronization.
+- Clearing site data loses the saved vault. Browser deletion is not claimed to provide forensic secure erasure.
+- Replacing the saved vault makes the previous private keys unavailable through the application.
 - Fingerprint verification depends on a separate trusted comparison channel.
 - Verified status is session-only; persistent contact and trust management have not been implemented.
 - Importing a key or viewing its fingerprint alone does not establish its owner's identity.
@@ -157,11 +177,12 @@ npm run dev
 
 Open the Vite URL and use:
 
-1. Generate Demo Keys
-2. Copy the shareable Alice and Pavel public-key PEM values, or paste and import public keys for those roles.
-3. Compare each SHA-256 fingerprint through a separate trusted channel and acknowledge the match.
-4. Encrypt
-5. Decrypt
+1. Generate ephemeral demo keys, or enter a passphrase and generate a saved encrypted vault.
+2. On a later visit, enter the same passphrase and unlock the saved vault.
+3. Copy the shareable Alice and Pavel public-key PEM values, or paste and import public keys for those roles.
+4. Compare each SHA-256 fingerprint through a separate trusted channel and acknowledge the match.
+5. Encrypt.
+6. Decrypt.
 
 The default sender message is `Meet me at 4 PM.` Empty messages are allowed and tested.
 
@@ -173,6 +194,7 @@ src/
     aes.ts
     encoding.ts
     keyGeneration.ts
+    privateKeyVault.ts
     publicKeyFingerprint.ts
     publicKeySerialization.ts
     rsaEncryption.ts
@@ -182,6 +204,8 @@ src/
     serialization.ts
   demo.ts
   main.ts
+  storage/
+    privateKeyVaultStorage.ts
   style.css
   trust/
     publicKeyTrust.ts
@@ -189,11 +213,12 @@ tests/
   crypto.test.ts
   publicKeyFingerprint.test.ts
   publicKeySerialization.test.ts
+  privateKeyVault.test.ts
+  privateKeyVaultStorage.test.ts
 ```
 
 ## Phase 2 Candidates
 
-- Add local private-key persistence with a serious protection model.
 - Add persistent contact and trust storage with explicit key-change handling.
 - Define how encrypted subjects and metadata should work.
 - Begin browser-extension architecture planning without touching Gmail yet.
