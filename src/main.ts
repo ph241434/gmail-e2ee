@@ -1,6 +1,7 @@
 import "./style.css";
 import {
   decryptDemoMessage,
+  createDemoKeyVault,
   encryptDemoMessage,
   exportDemoPublicKeys,
   fingerprintDemoPublicKey,
@@ -10,8 +11,15 @@ import {
   importDemoRecipientPublicKey,
   importDemoSenderPublicKey,
   parseEncryptedMessage,
+  unlockDemoKeyVault,
   type DemoKeys
 } from "./demo";
+import { PRIVATE_KEY_VAULT_MIN_PASSPHRASE_LENGTH } from "./crypto/privateKeyVault";
+import {
+  deletePrivateKeyVault,
+  loadPrivateKeyVault,
+  savePrivateKeyVault
+} from "./storage/privateKeyVaultStorage";
 import {
   createUnverifiedPublicKeyTrust,
   isPublicKeyVerified,
@@ -27,6 +35,9 @@ let recipientFingerprint: string | undefined;
 let senderFingerprint: string | undefined;
 let recipientTrust: SessionPublicKeyTrust | undefined;
 let senderTrust: SessionPublicKeyTrust | undefined;
+let activeKeySource: "ephemeral" | "vault" | undefined;
+let vaultExists = false;
+let isBusy = false;
 
 const app = document.querySelector<HTMLDivElement>("#app");
 
@@ -47,6 +58,33 @@ app.innerHTML = `
     <section class="status-row" aria-live="polite">
       <span id="key-status" class="status-pill">No demo keys yet</span>
       <span id="operation-status" class="status-text">Ready</span>
+    </section>
+
+    <section class="key-vault-section" aria-labelledby="key-vault-heading">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">PRIVATE KEYS STAY ENCRYPTED AT REST</p>
+          <h2 id="key-vault-heading">Local key vault</h2>
+        </div>
+        <span id="vault-status" class="vault-status">Checking this browser...</span>
+      </div>
+      <div class="vault-controls">
+        <div class="passphrase-field">
+          <label for="vault-passphrase">Vault passphrase</label>
+          <input
+            id="vault-passphrase"
+            type="password"
+            minlength="${PRIVATE_KEY_VAULT_MIN_PASSPHRASE_LENGTH}"
+            maxlength="1024"
+            autocomplete="new-password"
+            autocapitalize="none"
+            spellcheck="false"
+          >
+        </div>
+        <button id="generate-and-save-keys" type="button">Generate &amp; save keys</button>
+        <button id="unlock-vault" class="secondary-button" type="button" disabled>Unlock saved keys</button>
+        <button id="delete-vault" class="danger-button" type="button" disabled>Delete saved vault</button>
+      </div>
     </section>
 
     <section class="public-key-section" aria-labelledby="public-key-heading">
@@ -144,6 +182,10 @@ app.innerHTML = `
 `;
 
 const generateKeysButton = getElement<HTMLButtonElement>("generate-keys");
+const generateAndSaveKeysButton = getElement<HTMLButtonElement>("generate-and-save-keys");
+const unlockVaultButton = getElement<HTMLButtonElement>("unlock-vault");
+const deleteVaultButton = getElement<HTMLButtonElement>("delete-vault");
+const vaultPassphraseInput = getElement<HTMLInputElement>("vault-passphrase");
 const encryptButton = getElement<HTMLButtonElement>("encrypt");
 const decryptButton = getElement<HTMLButtonElement>("decrypt");
 const tamperCiphertextButton = getElement<HTMLButtonElement>("tamper-ciphertext");
@@ -164,29 +206,101 @@ const pavelTrustStatus = getElement<HTMLSpanElement>("pavel-trust-status");
 const decryptedMessageOutput = getElement<HTMLOutputElement>("decrypted-message");
 const keyStatus = getElement<HTMLSpanElement>("key-status");
 const operationStatus = getElement<HTMLSpanElement>("operation-status");
+const vaultStatus = getElement<HTMLSpanElement>("vault-status");
 
 generateKeysButton.addEventListener("click", async () => {
   setBusy(true, "Generating Pavel and Alice keys...");
 
   try {
-    demoKeys = await generateDemoKeys();
-    const [exportedPublicKeys, fingerprints] = await Promise.all([
-      exportDemoPublicKeys(demoKeys),
-      fingerprintDemoPublicKeys(demoKeys)
-    ]);
-    recipientEncryptionPublicKey = demoKeys.aliceEncryptionKeyPair.publicKey;
-    senderVerificationPublicKey = demoKeys.pavelSigningKeyPair.publicKey;
-    setRecipientFingerprint(fingerprints.aliceEncryptionFingerprint);
-    setSenderFingerprint(fingerprints.pavelVerificationFingerprint);
-    alicePublicKeyInput.value = exportedPublicKeys.aliceEncryptionPublicKey;
-    pavelPublicKeyInput.value = exportedPublicKeys.pavelVerificationPublicKey;
-    keyStatus.textContent = "Demo keys ready";
-    keyStatus.classList.add("is-ready");
-    updateControlStates();
-    setStatus("Keys generated. Compare both fingerprints before using them.");
+    const keys = await generateDemoKeys();
+    await activateDemoKeys(
+      keys,
+      "Ephemeral keys ready",
+      "Keys generated in memory. Compare both fingerprints before using them."
+    );
+    activeKeySource = "ephemeral";
   } catch (error) {
     setStatus(formatError(error));
   } finally {
+    setBusy(false);
+  }
+});
+
+generateAndSaveKeysButton.addEventListener("click", async () => {
+  if (
+    vaultExists &&
+    !window.confirm("Replace the saved vault? The current private keys cannot be recovered afterward.")
+  ) {
+    return;
+  }
+
+  setBusy(true, "Generating and protecting new private keys...");
+
+  try {
+    const created = await createDemoKeyVault(vaultPassphraseInput.value);
+    await savePrivateKeyVault(created.vault);
+    vaultExists = true;
+    await activateDemoKeys(
+      created.demoKeys,
+      "Vault keys unlocked",
+      "Encrypted key vault saved in this browser. Compare both fingerprints before use."
+    );
+    activeKeySource = "vault";
+    renderVaultStatus();
+  } catch (error) {
+    setStatus(formatError(error));
+  } finally {
+    vaultPassphraseInput.value = "";
+    setBusy(false);
+  }
+});
+
+unlockVaultButton.addEventListener("click", async () => {
+  setBusy(true, "Unlocking the saved private-key vault...");
+
+  try {
+    const vault = await loadPrivateKeyVault();
+    if (vault === undefined) {
+      vaultExists = false;
+      renderVaultStatus();
+      setStatus("No saved private-key vault was found in this browser.");
+      return;
+    }
+
+    const keys = await unlockDemoKeyVault(vault, vaultPassphraseInput.value);
+    await activateDemoKeys(
+      keys,
+      "Vault keys unlocked",
+      "Private keys unlocked for this session. Compare both fingerprints before use."
+    );
+    activeKeySource = "vault";
+  } catch (error) {
+    setStatus(formatError(error));
+  } finally {
+    vaultPassphraseInput.value = "";
+    setBusy(false);
+  }
+});
+
+deleteVaultButton.addEventListener("click", async () => {
+  if (!window.confirm("Delete the encrypted private-key vault from this browser?")) {
+    return;
+  }
+
+  setBusy(true, "Deleting the saved private-key vault...");
+
+  try {
+    await deletePrivateKeyVault();
+    vaultExists = false;
+    if (activeKeySource === "vault") {
+      clearActiveKeys();
+    }
+    renderVaultStatus();
+    setStatus("Saved private-key vault deleted from this browser.");
+  } catch (error) {
+    setStatus(formatError(error));
+  } finally {
+    vaultPassphraseInput.value = "";
     setBusy(false);
   }
 });
@@ -368,31 +482,94 @@ function getElement<T extends HTMLElement>(id: string): T {
   return element as T;
 }
 
-function setBusy(isBusy: boolean, message?: string): void {
-  generateKeysButton.disabled = isBusy;
+function setBusy(busy: boolean, message?: string): void {
+  isBusy = busy;
+  generateKeysButton.disabled = busy;
+  generateAndSaveKeysButton.disabled = busy;
+  unlockVaultButton.disabled = busy || !vaultExists;
+  deleteVaultButton.disabled = busy || !vaultExists;
+  vaultPassphraseInput.disabled = busy;
   encryptButton.disabled =
-    isBusy ||
+    busy ||
     !demoKeys ||
     !recipientEncryptionPublicKey ||
     !isPublicKeyVerified(recipientTrust, recipientFingerprint);
   decryptButton.disabled =
-    isBusy ||
+    busy ||
     !demoKeys ||
     !senderVerificationPublicKey ||
     !isPublicKeyVerified(senderTrust, senderFingerprint) ||
     encryptedPackageInput.value.trim().length === 0;
   tamperCiphertextButton.disabled =
-    isBusy || encryptedPackageInput.value.trim().length === 0;
-  copyAliceKeyButton.disabled = isBusy || alicePublicKeyInput.value.trim().length === 0;
-  importAliceKeyButton.disabled = isBusy || alicePublicKeyInput.value.trim().length === 0;
-  copyPavelKeyButton.disabled = isBusy || pavelPublicKeyInput.value.trim().length === 0;
-  importPavelKeyButton.disabled = isBusy || pavelPublicKeyInput.value.trim().length === 0;
-  verifyAliceKeyCheckbox.disabled = isBusy || !recipientTrust;
-  verifyPavelKeyCheckbox.disabled = isBusy || !senderTrust;
+    busy || encryptedPackageInput.value.trim().length === 0;
+  copyAliceKeyButton.disabled = busy || alicePublicKeyInput.value.trim().length === 0;
+  importAliceKeyButton.disabled = busy || alicePublicKeyInput.value.trim().length === 0;
+  copyPavelKeyButton.disabled = busy || pavelPublicKeyInput.value.trim().length === 0;
+  importPavelKeyButton.disabled = busy || pavelPublicKeyInput.value.trim().length === 0;
+  verifyAliceKeyCheckbox.disabled = busy || !recipientTrust;
+  verifyPavelKeyCheckbox.disabled = busy || !senderTrust;
 
   if (message) {
     setStatus(message);
   }
+}
+
+async function activateDemoKeys(
+  keys: DemoKeys,
+  readyLabel: string,
+  readyMessage: string
+): Promise<void> {
+  const [exportedPublicKeys, fingerprints] = await Promise.all([
+    exportDemoPublicKeys(keys),
+    fingerprintDemoPublicKeys(keys)
+  ]);
+  demoKeys = keys;
+  recipientEncryptionPublicKey = keys.aliceEncryptionKeyPair.publicKey;
+  senderVerificationPublicKey = keys.pavelSigningKeyPair.publicKey;
+  setRecipientFingerprint(fingerprints.aliceEncryptionFingerprint);
+  setSenderFingerprint(fingerprints.pavelVerificationFingerprint);
+  alicePublicKeyInput.value = exportedPublicKeys.aliceEncryptionPublicKey;
+  pavelPublicKeyInput.value = exportedPublicKeys.pavelVerificationPublicKey;
+  keyStatus.textContent = readyLabel;
+  keyStatus.classList.add("is-ready");
+  encryptedPackageInput.value = "";
+  decryptedMessageOutput.textContent = "Nothing decrypted yet";
+  updateControlStates();
+  setStatus(readyMessage);
+}
+
+function clearActiveKeys(): void {
+  demoKeys = undefined;
+  activeKeySource = undefined;
+  recipientEncryptionPublicKey = undefined;
+  senderVerificationPublicKey = undefined;
+  alicePublicKeyInput.value = "";
+  pavelPublicKeyInput.value = "";
+  encryptedPackageInput.value = "";
+  decryptedMessageOutput.textContent = "Nothing decrypted yet";
+  clearRecipientFingerprint();
+  clearSenderFingerprint();
+  keyStatus.textContent = "No demo keys yet";
+  keyStatus.classList.remove("is-ready");
+  updateControlStates();
+}
+
+async function refreshVaultStatus(): Promise<void> {
+  try {
+    vaultExists = (await loadPrivateKeyVault()) !== undefined;
+    renderVaultStatus();
+  } catch (error) {
+    vaultExists = false;
+    vaultStatus.textContent = "Storage unavailable";
+    setStatus(formatError(error));
+  } finally {
+    updateControlStates();
+  }
+}
+
+function renderVaultStatus(): void {
+  vaultStatus.textContent = vaultExists ? "Encrypted vault saved" : "No saved vault";
+  vaultStatus.classList.toggle("is-saved", vaultExists);
 }
 
 function setRecipientFingerprint(fingerprint: string): void {
@@ -444,7 +621,7 @@ function renderOneTrustStatus(element: HTMLElement, isVerified: boolean): void {
 }
 
 function updateControlStates(): void {
-  setBusy(false);
+  setBusy(isBusy);
 }
 
 function setStatus(message: string): void {
@@ -468,3 +645,5 @@ function tamperBase64Text(value: string): string {
   const replacement = value.startsWith("A") ? "B" : "A";
   return `${replacement}${value.slice(1)}`;
 }
+
+void refreshVaultStatus();

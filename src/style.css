@@ -20,6 +20,7 @@ body {
 }
 
 button,
+input,
 textarea {
   font: inherit;
 }
@@ -74,6 +75,22 @@ textarea {
 }
 
 textarea:focus {
+  border-color: #176b87;
+  outline: 3px solid rgb(23 107 135 / 0.18);
+}
+
+input[type="password"] {
+  width: 100%;
+  min-height: 42px;
+  border: 1px solid #cbd5df;
+  border-radius: 6px;
+  padding: 0 12px;
+  color: #1d232f;
+  background: #ffffff;
+  box-shadow: inset 0 1px 2px rgb(17 24 39 / 0.05);
+}
+
+input[type="password"]:focus {
   border-color: #176b87;
   outline: 3px solid rgb(23 107 135 / 0.18);
 }
@@ -140,6 +157,46 @@ h1 {
 .status-text {
   color: #536172;
   font-size: 0.92rem;
+}
+
+.key-vault-section {
+  margin-bottom: 22px;
+  padding: 18px 0 22px;
+  border-bottom: 1px solid #dce3ea;
+}
+
+.vault-status {
+  color: #7a4a16;
+  font-size: 0.88rem;
+  font-weight: 800;
+}
+
+.vault-status.is-saved {
+  color: #19583e;
+}
+
+.vault-controls {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) repeat(3, minmax(150px, auto));
+  gap: 10px;
+  align-items: end;
+}
+
+.vault-controls button {
+  white-space: nowrap;
+}
+
+.passphrase-field label {
+  margin-bottom: 6px;
+}
+
+button.danger-button {
+  color: #7a271a;
+  background: #f8e6e2;
+}
+
+button.danger-button:hover:not(:disabled) {
+  background: #efd1ca;
 }
 
 .public-key-section {
@@ -347,6 +404,14 @@ output {
   .public-key-grid {
     grid-template-columns: 1fr;
   }
+
+  .vault-controls {
+    grid-template-columns: repeat(3, 1fr);
+  }
+
+  .passphrase-field {
+    grid-column: 1 / -1;
+  }
 }
 
 @media (max-width: 640px) {
@@ -379,5 +444,13 @@ output {
 
   .field-list div {
     grid-template-columns: 1fr;
+  }
+
+  .vault-controls {
+    grid-template-columns: 1fr;
+  }
+
+  .passphrase-field {
+    grid-column: auto;
   }
 }
