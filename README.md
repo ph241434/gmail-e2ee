@@ -15,7 +15,7 @@ Implemented:
 - SPKI public-key import/export using PEM text
 - SHA-256 public-key fingerprints with session-only verification state
 - passphrase-protected private-key persistence in IndexedDB
-- 44 automated tests
+- 55 automated tests
 
 Not yet implemented:
 - Gmail integration
@@ -95,6 +95,10 @@ When a vault is created:
 Unlock validates the vault structure and public-key fingerprints before unwrapping. A wrong passphrase, altered wrapped key, substituted public key, or swapped role record produces the same generic unlock failure. Creating a new vault replaces the single saved vault only after the new encrypted value is ready.
 
 The passphrase policy requires 12 to 1,024 characters. The minimum is a guardrail, not a measure of passphrase strength or a recovery mechanism.
+
+The main vault control follows its current state: create, unlock, lock, or clear temporary keys. Lock releases active key references, clears session trust and message fields, and preserves the encrypted vault for a later unlock. This is an application reset, not a guarantee of secure memory erasure in JavaScript.
+
+Temporary key generation, vault replacement, and vault deletion are available under **Advanced key options**. Temporary keys do not modify the saved vault. Replacement and deletion require confirmation.
 
 ## Fingerprints and Session Trust
 
@@ -177,14 +181,16 @@ npm run dev
 
 Open the Vite URL and use:
 
-1. Generate ephemeral demo keys, or enter a passphrase and generate a saved encrypted vault.
-2. On a later visit, enter the same passphrase and unlock the saved vault.
-3. Copy the shareable Alice and Pavel public-key PEM values, or paste and import public keys for those roles.
+1. Enter a passphrase and select **Create vault**, or open **Advanced key options** to use temporary keys.
+2. On a later visit, enter the same passphrase and select **Unlock**. Select **Lock** to end the active key session.
+3. Open **Public key text** under Alice or Pavel to copy or import a public key when needed.
 4. Compare each SHA-256 fingerprint through a separate trusted channel and acknowledge the match.
 5. Encrypt.
 6. Decrypt.
 
 The default sender message is `Meet me at 4 PM.` Empty messages are allowed and tested.
+
+The raw encrypted JSON, package fields, and tamper control are available under **Encrypted package details**. Public-key text and advanced controls are collapsed by default; fingerprints and verification controls remain visible.
 
 ## Project Structure
 
@@ -209,12 +215,15 @@ src/
   style.css
   trust/
     publicKeyTrust.ts
+  ui/
+    keySession.ts
 tests/
   crypto.test.ts
   publicKeyFingerprint.test.ts
   publicKeySerialization.test.ts
   privateKeyVault.test.ts
   privateKeyVaultStorage.test.ts
+  keySession.test.ts
 ```
 
 ## Phase 2 Candidates
