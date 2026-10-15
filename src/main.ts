@@ -4,12 +4,9 @@ import {
   decryptDemoMessage,
   encryptDemoMessage,
   exportDemoPublicKeys,
-  fingerprintDemoPublicKey,
   fingerprintDemoPublicKeys,
   formatEncryptedMessage,
   generateDemoKeys,
-  importDemoRecipientPublicKey,
-  importDemoSenderPublicKey,
   parseEncryptedMessage,
   unlockDemoKeyVault,
   type DemoKeys
@@ -23,12 +20,9 @@ import {
   loadPrivateKeyVault,
   savePrivateKeyVault
 } from "./storage/privateKeyVaultStorage";
-import {
-  isPublicKeyVerified,
-  markPublicKeyUnverified,
-  markPublicKeyVerified
-} from "./trust/publicKeyTrust";
+import { isPublicKeyVerified } from "./trust/publicKeyTrust";
 import { getVaultView, KeySession, type ActiveKeySource } from "./ui/keySession";
+import { ContactController } from "./ui/contactController";
 
 const session = new KeySession();
 let vaultExists = false;
@@ -79,42 +73,46 @@ app.innerHTML = `
       <div class="public-key-grid">
         <article class="key-card">
           <div class="key-heading">
-            <h3>Alice <span>Encryption key</span></h3>
+            <h3><span id="alice-key-name" class="key-name">Alice</span><span>Encryption key</span></h3>
             <span id="alice-trust-status" class="trust-status">Unverified</span>
           </div>
+          <div id="alice-contact-picker" class="contact-picker"></div>
           <code id="alice-fingerprint" class="fingerprint-value" aria-label="Alice's SHA-256 fingerprint">No key loaded</code>
           <label class="trust-checkbox" for="verify-alice-key">
             <input id="verify-alice-key" type="checkbox" disabled>
-            <span>I compared this fingerprint with Alice through a separate trusted channel.</span>
+            <span id="alice-verification-label">I compared this fingerprint with Alice through a separate trusted channel.</span>
           </label>
           <details id="alice-key-details" class="key-details">
             <summary>Public key text</summary>
-            <label for="alice-public-key">Alice's public encryption key</label>
+            <label for="alice-public-key">Recipient public encryption key</label>
             <textarea id="alice-public-key" class="public-key-input" spellcheck="false" placeholder="Paste a public key in PEM format"></textarea>
             <div class="button-row">
               <button id="copy-alice-key" class="secondary-button" type="button" disabled>Copy public key</button>
               <button id="import-alice-key" type="button" disabled>Import for encryption</button>
             </div>
+            <div id="alice-contact-editor"></div>
           </details>
         </article>
         <article class="key-card">
           <div class="key-heading">
-            <h3>Pavel <span>Signature-verification key</span></h3>
+            <h3><span id="pavel-key-name" class="key-name">Pavel</span><span>Signature-verification key</span></h3>
             <span id="pavel-trust-status" class="trust-status">Unverified</span>
           </div>
+          <div id="pavel-contact-picker" class="contact-picker"></div>
           <code id="pavel-fingerprint" class="fingerprint-value" aria-label="Pavel's SHA-256 fingerprint">No key loaded</code>
           <label class="trust-checkbox" for="verify-pavel-key">
             <input id="verify-pavel-key" type="checkbox" disabled>
-            <span>I compared this fingerprint with Pavel through a separate trusted channel.</span>
+            <span id="pavel-verification-label">I compared this fingerprint with Pavel through a separate trusted channel.</span>
           </label>
           <details id="pavel-key-details" class="key-details">
             <summary>Public key text</summary>
-            <label for="pavel-public-key">Pavel's public signature-verification key</label>
+            <label for="pavel-public-key">Sender public verification key</label>
             <textarea id="pavel-public-key" class="public-key-input" spellcheck="false" placeholder="Paste a public key in PEM format"></textarea>
             <div class="button-row">
               <button id="copy-pavel-key" class="secondary-button" type="button" disabled>Copy public key</button>
               <button id="import-pavel-key" type="button" disabled>Import for verification</button>
             </div>
+            <div id="pavel-contact-editor"></div>
           </details>
         </article>
       </div>
@@ -194,6 +192,16 @@ const confirmationDialog = getElement<HTMLDialogElement>("vault-confirmation");
 const confirmationTitle = getElement<HTMLHeadingElement>("confirmation-title");
 const confirmationMessage = getElement<HTMLParagraphElement>("confirmation-message");
 const confirmVaultActionButton = getElement<HTMLButtonElement>("confirm-vault-action");
+const contactController = new ContactController(session, {
+  run: runOperation,
+  changed: () => {
+    decryptedMessageOutput.textContent = "Nothing decrypted yet";
+    renderTrust();
+    renderControls();
+  },
+  status: setStatus,
+  confirm: confirmAction
+});
 
 vaultForm.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -252,10 +260,10 @@ deleteVaultButton.addEventListener("click", async () => {
 
 encryptButton.addEventListener("click", async () => {
   if (!session.canEncrypt || !session.keys || !session.recipientPublicKey) return;
-  const keys = session.keys;
-  const recipientKey = session.recipientPublicKey;
   await runOperation("Encrypting message...", async () => {
-    const encrypted = await encryptDemoMessage(plaintextInput.value, keys, recipientKey);
+    await contactController.checkBeforeUse("encryption");
+    if (!session.canEncrypt || !session.keys || !session.recipientPublicKey) throw new Error("Verify the current recipient key before encryption.");
+    const encrypted = await encryptDemoMessage(plaintextInput.value, session.keys, session.recipientPublicKey);
     encryptedPackageInput.value = formatEncryptedMessage(encrypted);
     decryptedMessageOutput.textContent = "Nothing decrypted yet";
     setStatus("Encrypted and signed package ready.");
@@ -264,13 +272,13 @@ encryptButton.addEventListener("click", async () => {
 
 decryptButton.addEventListener("click", async () => {
   if (!session.canDecrypt || !session.keys || !session.senderPublicKey) return;
-  const keys = session.keys;
-  const senderKey = session.senderPublicKey;
   await runOperation("Verifying and decrypting...", async () => {
     try {
-      const plaintext = await decryptDemoMessage(parseEncryptedMessage(encryptedPackageInput.value), keys, senderKey);
+      await contactController.checkBeforeUse("verification");
+      if (!session.canDecrypt || !session.keys || !session.senderPublicKey) throw new Error("Verify the current sender key before decryption.");
+      const plaintext = await decryptDemoMessage(parseEncryptedMessage(encryptedPackageInput.value), session.keys, session.senderPublicKey);
       decryptedMessageOutput.textContent = plaintext || "(empty message)";
-      setStatus("Signature verified. Message decrypted for Alice.");
+      setStatus("Signature verified. Message decrypted.");
     } catch (error) {
       decryptedMessageOutput.textContent = "Decryption failed";
       throw error;
@@ -311,41 +319,31 @@ copyAliceKeyButton.addEventListener("click", () => void copyPublicKey(alicePubli
 copyPavelKeyButton.addEventListener("click", () => void copyPublicKey(pavelPublicKeyInput.value));
 
 importAliceKeyButton.addEventListener("click", async () => {
-  await runOperation("Importing Alice's key...", async () => {
-    const key = await importDemoRecipientPublicKey(alicePublicKeyInput.value);
-    session.setRecipientKey(key, await fingerprintDemoPublicKey(key));
+  await runOperation("Importing recipient key...", async () => {
+    await contactController.importKey("encryption", alicePublicKeyInput.value);
     renderTrust();
-    setStatus("Alice's key imported. Compare its fingerprint before encryption.");
   });
+  importAliceKeyButton.focus();
 });
 importPavelKeyButton.addEventListener("click", async () => {
-  await runOperation("Importing Pavel's key...", async () => {
-    const key = await importDemoSenderPublicKey(pavelPublicKeyInput.value);
-    session.setSenderKey(key, await fingerprintDemoPublicKey(key));
+  await runOperation("Importing sender key...", async () => {
+    await contactController.importKey("verification", pavelPublicKeyInput.value);
     renderTrust();
-    setStatus("Pavel's key imported. Compare its fingerprint before verification.");
   });
+  importPavelKeyButton.focus();
 });
 
 verifyAliceKeyCheckbox.addEventListener("change", () => {
   if (!session.recipientTrust || isBusy) return;
-  session.recipientTrust = verifyAliceKeyCheckbox.checked
-    ? markPublicKeyVerified(session.recipientTrust) : markPublicKeyUnverified(session.recipientTrust);
-  renderTrust();
-  renderControls();
-  setStatus(verifyAliceKeyCheckbox.checked
-    ? "Alice's fingerprint verified for this session."
-    : "Alice's fingerprint verification cleared.");
+  const verified = verifyAliceKeyCheckbox.checked;
+  void runOperation("Updating verification...", () => contactController.setVerified("encryption", verified))
+    .then(() => verifyAliceKeyCheckbox.focus());
 });
 verifyPavelKeyCheckbox.addEventListener("change", () => {
   if (!session.senderTrust || isBusy) return;
-  session.senderTrust = verifyPavelKeyCheckbox.checked
-    ? markPublicKeyVerified(session.senderTrust) : markPublicKeyUnverified(session.senderTrust);
-  renderTrust();
-  renderControls();
-  setStatus(verifyPavelKeyCheckbox.checked
-    ? "Pavel's fingerprint verified for this session."
-    : "Pavel's fingerprint verification cleared.");
+  const verified = verifyPavelKeyCheckbox.checked;
+  void runOperation("Updating verification...", () => contactController.setVerified("verification", verified))
+    .then(() => verifyPavelKeyCheckbox.focus());
 });
 
 async function createAndSaveVault(input: HTMLInputElement): Promise<void> {
@@ -362,12 +360,16 @@ async function createAndSaveVault(input: HTMLInputElement): Promise<void> {
 }
 
 function confirmVaultAction(action: "replace" | "delete"): Promise<boolean> {
-  if (confirmationDialog.open) return Promise.resolve(false);
   const label = action === "replace" ? "Replace vault" : "Delete vault";
-  confirmationTitle.textContent = `${label}?`;
-  confirmationMessage.textContent = action === "replace"
+  return confirmAction(`${label}?`, action === "replace"
     ? "The saved private keys will be replaced. They cannot be recovered afterward."
-    : "The encrypted private-key vault will be deleted from this browser. This cannot be undone.";
+    : "The encrypted private-key vault will be deleted from this browser. This cannot be undone.", label);
+}
+
+function confirmAction(title: string, message: string, label = "Delete contact"): Promise<boolean> {
+  if (confirmationDialog.open) return Promise.resolve(false);
+  confirmationTitle.textContent = title;
+  confirmationMessage.textContent = message;
   confirmVaultActionButton.textContent = label;
   confirmationDialog.returnValue = "cancel";
   return new Promise((resolve) => {
@@ -386,6 +388,7 @@ async function activateDemoKeys(keys: DemoKeys, source: ActiveKeySource): Promis
     exportDemoPublicKeys(keys), fingerprintDemoPublicKeys(keys)
   ]);
   session.activate(keys, source, fingerprints);
+  contactController.resetBindings();
   alicePublicKeyInput.value = publicKeys.aliceEncryptionPublicKey;
   pavelPublicKeyInput.value = publicKeys.pavelVerificationPublicKey;
   encryptedPackageInput.value = "";
@@ -396,6 +399,7 @@ async function activateDemoKeys(keys: DemoKeys, source: ActiveKeySource): Promis
 
 function clearActiveKeys(): void {
   session.clear();
+  contactController.resetBindings();
   plaintextInput.value = "";
   encryptedPackageInput.value = "";
   decryptedMessageOutput.textContent = "Nothing decrypted yet";
@@ -438,6 +442,7 @@ function renderControls(): void {
     input.disabled = isBusy;
   });
   app?.setAttribute("aria-busy", String(isBusy));
+  contactController.setBusy(isBusy);
 }
 
 function renderTrust(): void {
@@ -445,8 +450,8 @@ function renderTrust(): void {
   const senderVerified = isPublicKeyVerified(session.senderTrust, session.senderFingerprint);
   aliceFingerprintOutput.textContent = session.recipientFingerprint || "No key loaded";
   pavelFingerprintOutput.textContent = session.senderFingerprint || "No key loaded";
-  aliceTrustStatus.textContent = recipientVerified ? "Verified this session" : "Unverified";
-  pavelTrustStatus.textContent = senderVerified ? "Verified this session" : "Unverified";
+  aliceTrustStatus.textContent = contactController.statusLabel("encryption", recipientVerified);
+  pavelTrustStatus.textContent = contactController.statusLabel("verification", senderVerified);
   aliceTrustStatus.classList.toggle("is-verified", recipientVerified);
   pavelTrustStatus.classList.toggle("is-verified", senderVerified);
   verifyAliceKeyCheckbox.checked = recipientVerified;
@@ -512,3 +517,4 @@ async function initializeVault(): Promise<void> {
 }
 
 void initializeVault();
+void contactController.initialize().catch((error: unknown) => setStatus(formatError(error)));

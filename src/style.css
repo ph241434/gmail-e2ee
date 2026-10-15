@@ -10,7 +10,7 @@
 
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
-body { min-width: 320px; margin: 0; }
+body { min-width: 0; margin: 0; }
 button, input, textarea { font: inherit; }
 button {
   min-height: 42px;
@@ -34,7 +34,7 @@ h1 { font-size: 2rem; line-height: 1.2; letter-spacing: 0; }
 h2 { margin-bottom: 12px; font-size: 1.05rem; letter-spacing: 0; }
 h3 { font-size: 0.95rem; letter-spacing: 0; }
 h3 span { display: block; color: #58646e; font-size: 0.8rem; font-weight: 500; }
-textarea, input[type="password"], output {
+textarea, input[type="password"], input[type="text"], input[type="email"], select, output {
   width: 100%;
   border: 1px solid #cbd5df;
   border-radius: 6px;
@@ -44,6 +44,7 @@ textarea, input[type="password"], output {
 }
 textarea { display: block; min-height: 156px; resize: vertical; }
 input[type="password"] { min-height: 42px; padding: 8px 12px; }
+input[type="text"], input[type="email"], select { min-height: 40px; padding: 7px 10px; font-size: 0.84rem; }
 output { display: block; min-height: 156px; overflow-wrap: anywhere; white-space: pre-wrap; }
 .app-shell { width: min(1040px, calc(100% - 40px)); margin: 0 auto; padding: 26px 0 40px; }
 .masthead { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
@@ -70,6 +71,15 @@ label.trust-checkbox { display: flex; align-items: start; gap: 9px; margin: 6px 
 .trust-checkbox input { flex: none; width: 18px; height: 18px; margin: 1px 0 0; accent-color: #176b87; }
 .trust-checkbox:has(input:disabled) { cursor: not-allowed; opacity: 0.6; }
 .key-details { margin-top: 10px; border-top: 1px solid #e7ecf0; }
+.key-name { color: #232a30; font-size: 0.95rem; font-weight: 650; overflow-wrap: anywhere; }
+.contact-picker { margin-bottom: 12px; }
+.contact-picker label { font-size: 0.76rem; color: #52606a; font-weight: 500; }
+.contact-picker select { max-width: 100%; }
+.key-warning { margin-top: 8px; color: #903a20; font-size: 0.8rem; font-weight: 600; }
+.contact-form { display: grid; gap: 10px; margin-top: 18px; padding-top: 14px; border-top: 1px solid #e7ecf0; }
+.contact-form .button-row { margin-top: 0; }
+.contact-history { margin-top: 12px; }
+.contact-history p { margin-bottom: 10px; color: #52606a; font-family: "Cascadia Mono", Consolas, monospace; font-size: 0.73rem; overflow-wrap: anywhere; }
 .public-key-input, #encrypted-package { font-family: "Cascadia Mono", Consolas, monospace; font-size: 0.76rem; line-height: 1.5; }
 .public-key-input { min-height: 190px; }
 .button-row { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 10px; }
