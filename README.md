@@ -4,7 +4,7 @@
 
 ## Status
 
-Phase 1 complete. Phase 2 public-key verification and encrypted local private-key persistence complete.
+Phase 1 complete. Phase 2 public-key verification, encrypted local private-key persistence, and persistent contacts with key-change detection implemented.
 
 Implemented:
 - AES-GCM message encryption
@@ -13,14 +13,15 @@ Implemented:
 - deterministic message serialization
 - tamper/wrong-key failure handling
 - SPKI public-key import/export using PEM text
-- SHA-256 public-key fingerprints with session-only verification state
+- SHA-256 public-key fingerprints with session verification or saved contact trust
 - passphrase-protected private-key persistence in IndexedDB
-- 55 automated tests
+- persistent contacts, role-specific trust, verification timestamps, and key-change history
+- stale-update rejection and stored-trust checks before crypto operations
+- 85 automated tests
 
 Not yet implemented:
 - Gmail integration
 - browser extension APIs
-- persistent contact and trust storage
 
 This is an educational end-to-end encryption proof of concept intended to eventually integrate with Gmail. The project deliberately stays local: no Gmail integration, Google APIs, OAuth flow, extension APIs, or key server.
 
@@ -100,16 +101,30 @@ The main vault control follows its current state: create, unlock, lock, or clear
 
 Temporary key generation, vault replacement, and vault deletion are available under **Advanced key options**. Temporary keys do not modify the saved vault. Replacement and deletion require confirmation.
 
-## Fingerprints and Session Trust
+## Fingerprints and Contact Trust
 
 The app derives each public-key fingerprint by hashing its canonical SPKI bytes with SHA-256. Fingerprints are displayed as 32 uppercase, colon-separated hexadecimal bytes so they can be compared through a separate trusted channel such as an in-person conversation or an established call.
 
-The local demo requires an explicit fingerprint-comparison acknowledgment before an Alice key can encrypt or a Pavel key can verify signatures. That verification state:
+The demo requires a fingerprint-comparison acknowledgment before a recipient key can encrypt or a sender key can verify signatures. For an unsaved key, that verification state:
 
 - is tied to the exact fingerprint
 - resets whenever the corresponding PEM text changes or another key is imported
 - exists only in browser memory for the current session
-- is not saved as a contact or durable identity assertion
+- is not automatically saved as a contact
+
+To persist a decision, open **Public key text**, enter a contact name and email, and select **Save as contact**. New contacts always start unverified. Compare the fingerprint through a separate trusted channel and select the verification checkbox to save that decision. On a later visit, unlock the vault and choose the contact from **Saved contact** to restore its exact key and saved trust.
+
+Each contact can contain an encryption key and a separate signature-verification key. Adding one role does not verify the other. With a contact selected, **Import** updates that contact's key for the corresponding role:
+
+- The same canonical key preserves its existing decision, even if PEM whitespace differs.
+- A different fingerprint produces a visible **Key changed** warning, clears verification, and blocks that role until explicitly reverified.
+- Returning to an older fingerprint also requires fresh verification.
+- **Verification history** records prior and replacement fingerprints, change timestamps, and the prior key's verification timestamp when it was verified.
+- Changing the contact email clears both roles' verification. Editing the display name alone does not.
+
+Contacts use the separate `gmail-e2ee-contacts` IndexedDB database. The existing `gmail-e2ee` encrypted vault format and database are unchanged. Lock clears active selections and session trust but retains saved contacts. Deleting or replacing a vault does not delete contacts, and deleting a contact does not delete the vault.
+
+Contact writes use revision checks to reject stale changes from another tab. Before encryption or signature verification, the app re-reads the selected contact and stops if its key, email identity, or saved trust no longer matches. Refresh the page to pick up contacts added or removed elsewhere. This detects local record changes; there is no remote key-discovery service.
 
 A matching fingerprint can support identity verification only when the comparison channel itself is trustworthy. The application cannot determine key ownership automatically.
 
@@ -163,7 +178,10 @@ This does not automatically hide:
 - Clearing site data loses the saved vault. Browser deletion is not claimed to provide forensic secure erasure.
 - Replacing the saved vault makes the previous private keys unavailable through the application.
 - Fingerprint verification depends on a separate trusted comparison channel.
-- Verified status is session-only; persistent contact and trust management have not been implemented.
+- Saved contact names, emails, public keys, and trust metadata are stored locally without encryption. They are not protected by the private-key vault passphrase.
+- Contact trust records and key-change history are not signed or tamper-proof against a malicious local user or code running in this origin.
+- Saved verification records a user's fingerprint comparison, not proof of email ownership or a certificate authority assertion.
+- Historical fingerprints are recorded, but old public-key material is not retained for automatic historical signature verification.
 - Importing a key or viewing its fingerprint alone does not establish its owner's identity.
 - Gmail integration has not been implemented.
 - Browser-extension APIs have not been implemented.
@@ -184,7 +202,7 @@ Open the Vite URL and use:
 1. Enter a passphrase and select **Create vault**, or open **Advanced key options** to use temporary keys.
 2. On a later visit, enter the same passphrase and select **Unlock**. Select **Lock** to end the active key session.
 3. Open **Public key text** under Alice or Pavel to copy or import a public key when needed.
-4. Compare each SHA-256 fingerprint through a separate trusted channel and acknowledge the match.
+4. Optionally save each loaded key as a contact, then compare its fingerprint through a separate trusted channel and acknowledge the match.
 5. Encrypt.
 6. Decrypt.
 
@@ -192,10 +210,14 @@ The default sender message is `Meet me at 4 PM.` Empty messages are allowed and 
 
 The raw encrypted JSON, package fields, and tamper control are available under **Encrypted package details**. Public-key text and advanced controls are collapsed by default; fingerprints and verification controls remain visible.
 
+See [the project report](docs/PROJECT-REPORT.md) for the complete architecture, implemented features, verification results, and remaining roadmap.
+
 ## Project Structure
 
 ```text
 src/
+  contacts/
+    contact.ts
   crypto/
     aes.ts
     encoding.ts
@@ -211,13 +233,16 @@ src/
   demo.ts
   main.ts
   storage/
+    contactStorage.ts
     privateKeyVaultStorage.ts
   style.css
   trust/
     publicKeyTrust.ts
   ui/
+    contactController.ts
     keySession.ts
 tests/
+  contacts.test.ts
   crypto.test.ts
   publicKeyFingerprint.test.ts
   publicKeySerialization.test.ts
@@ -226,8 +251,8 @@ tests/
   keySession.test.ts
 ```
 
-## Phase 2 Candidates
+## Next Milestones
 
-- Add persistent contact and trust storage with explicit key-change handling.
+- Add encrypted key backup, recovery, and a deliberate rotation/revocation protocol.
 - Define how encrypted subjects and metadata should work.
 - Begin browser-extension architecture planning without touching Gmail yet.
