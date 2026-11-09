@@ -1,10 +1,18 @@
-import { isVerifiedContactKey, normalizeContactKey, type Contact, type ContactKeyRole } from "../contacts/contact";
+import type * as openpgp from "openpgp";
+import { isVerifiedContactKey, normalizeContactKey, type Contact } from "../contacts/contact";
+import { formatFingerprint } from "../pgp/keys";
 import { ContactStore } from "../storage/contactStorage";
 import { markPublicKeyUnverified, markPublicKeyVerified } from "../trust/publicKeyTrust";
 import type { KeySession } from "./keySession";
 
+/** Which binding a card controls: the key we encrypt to, or the signer we require. */
+export type BindingSlot = "recipient" | "sender";
+
+const SLOTS = ["recipient", "sender"] as const;
+const DEFAULT_NAMES: Record<BindingSlot, string> = { recipient: "Recipient", sender: "Sender" };
+
 interface ContactView {
-  prefix: "alice" | "pavel";
+  slot: BindingSlot;
   contact?: Contact;
   select: HTMLSelectElement;
   name: HTMLInputElement;
@@ -13,6 +21,7 @@ interface ContactView {
   remove: HTMLButtonElement;
   warning: HTMLParagraphElement;
   history: HTMLDivElement;
+  keyText: HTMLTextAreaElement;
 }
 
 interface ContactUiActions {
@@ -24,16 +33,13 @@ interface ContactUiActions {
 
 export class ContactController {
   private readonly store = new ContactStore();
-  private readonly views: Record<ContactKeyRole, ContactView>;
+  private readonly views: Record<BindingSlot, ContactView>;
   private contacts: Contact[] = [];
   private ready = false;
   private busy = false;
 
   constructor(private readonly session: KeySession, private readonly actions: ContactUiActions) {
-    this.views = {
-      encryption: this.mount("alice", "encryption"),
-      verification: this.mount("pavel", "verification")
-    };
+    this.views = { recipient: this.mount("recipient"), sender: this.mount("sender") };
   }
 
   async initialize(): Promise<void> {
@@ -57,120 +63,131 @@ export class ContactController {
     this.render();
   }
 
-  statusLabel(role: ContactKeyRole, verified: boolean): string {
-    const view = this.views[role];
-    const key = view.contact?.keys[role];
-    if (key?.status === "changed" && key.fingerprint === this.fingerprint(role)) return "Key changed";
+  isOwnKey(slot: BindingSlot): boolean {
+    return this.session.isOwnKey(this.fingerprint(slot));
+  }
+
+  statusLabel(slot: BindingSlot, verified: boolean): string {
+    const view = this.views[slot];
+    if (this.isOwnKey(slot)) return "Your key";
+    const key = view.contact?.key;
+    if (key?.status === "changed" && key.fingerprint === this.fingerprint(slot)) return "Key changed";
     return verified ? view.contact ? "Verified contact" : "Verified this session" : "Unverified";
   }
 
-  async importKey(role: ContactKeyRole, pem: string): Promise<void> {
-    const view = this.views[role];
+  async importKey(slot: BindingSlot, armoredKey: string): Promise<void> {
+    const view = this.views[slot];
     if (view.contact) {
-      const updated = await this.store.updateKey(view.contact.id, view.contact.revision, role, pem);
-      await this.applyToBindings(updated, role);
+      const updated = await this.store.updateKey(view.contact.id, view.contact.revision, armoredKey);
+      await this.applyToBindings(updated, slot);
       await this.reloadList();
-      this.actions.status(updated.keys[role]?.status === "changed"
+      this.actions.status(updated.key.status === "changed"
         ? "Contact key changed. Compare the new fingerprint before using it."
         : "Contact key loaded. Its saved verification applies only to this fingerprint.");
     } else {
-      const key = await normalizeContactKey(role, pem);
-      this.setKey(role, key.publicKey, key.fingerprint);
-      this.actions.status("Public key imported. Compare its fingerprint before use.");
+      const parsed = await normalizeContactKey(armoredKey);
+      this.setKey(slot, parsed.key, parsed.fingerprint);
+      view.keyText.value = parsed.armoredKey;
+      if (!this.session.isOwnKey(parsed.fingerprint)) {
+        // Prefill from the key's self-signed primary user ID; the user can still edit before saving.
+        view.name.value ||= parsed.primaryUser.name;
+        view.email.value ||= parsed.primaryUser.email;
+      }
+      this.actions.status(this.session.isOwnKey(parsed.fingerprint)
+        ? "This is your own key."
+        : `Public key for ${parsed.emails.join(", ") || "no email"} imported. Compare its fingerprint before use.`);
     }
     this.actions.changed();
   }
 
-  async setVerified(role: ContactKeyRole, verified: boolean): Promise<void> {
-    const view = this.views[role];
-    const trust = role === "encryption" ? this.session.recipientTrust : this.session.senderTrust;
-    const fingerprint = this.fingerprint(role);
-    if (!trust || !fingerprint) return;
+  async setVerified(slot: BindingSlot, verified: boolean): Promise<void> {
+    const view = this.views[slot];
+    const trust = slot === "recipient" ? this.session.recipientTrust : this.session.senderTrust;
+    const fingerprint = this.fingerprint(slot);
+    if (!trust || !fingerprint || this.isOwnKey(slot)) return;
     // A failed persistence operation must not leave a verified in-memory decision.
-    if (role === "encryption") this.session.recipientTrust = markPublicKeyUnverified(trust);
-    else this.session.senderTrust = markPublicKeyUnverified(trust);
+    this.setTrust(slot, markPublicKeyUnverified(trust));
     this.actions.changed();
     if (view.contact) {
-      const updated = await this.store.setVerified(view.contact.id, view.contact.revision, role, fingerprint, verified);
+      const updated = await this.store.setVerified(view.contact.id, view.contact.revision, fingerprint, verified);
       await this.applyToBindings(updated);
       await this.reloadList();
       this.actions.status(verified ? "Contact fingerprint verified and saved." : "Contact verification cleared.");
     } else {
-      const next = verified ? markPublicKeyVerified(trust) : markPublicKeyUnverified(trust);
-      if (role === "encryption") this.session.recipientTrust = next;
-      else this.session.senderTrust = next;
+      this.setTrust(slot, verified ? markPublicKeyVerified(trust) : markPublicKeyUnverified(trust));
       this.actions.status(verified ? "Fingerprint verified for this session." : "Fingerprint verification cleared.");
     }
     this.actions.changed();
   }
 
-  async checkBeforeUse(role: ContactKeyRole): Promise<void> {
-    const view = this.views[role];
-    if (!view.contact) return;
+  async checkBeforeUse(slot: BindingSlot): Promise<void> {
+    const view = this.views[slot];
+    if (!view.contact || this.isOwnKey(slot)) return;
     let current: Contact;
     try {
       current = await this.store.get(view.contact.id);
     } catch (error) {
-      this.setKey(role);
+      this.setKey(slot);
       this.actions.changed();
       throw error;
     }
-    const stale = !isVerifiedContactKey(current, role, this.fingerprint(role)) || current.email !== view.contact.email;
+    const stale = !isVerifiedContactKey(current, this.fingerprint(slot)) || current.email !== view.contact.email;
     await this.applyToBindings(current);
     this.actions.changed();
     if (stale) throw new Error("Contact key or verification changed. Review its current fingerprint before use.");
   }
 
-  private mount(prefix: "alice" | "pavel", role: ContactKeyRole): ContactView {
-    document.getElementById(`${prefix}-contact-picker`)!.innerHTML = `
-      <label for="${prefix}-contact">Saved contact</label>
-      <select id="${prefix}-contact" disabled><option value="">Unsaved key</option></select>
-      <p id="${prefix}-key-warning" class="key-warning" role="alert" hidden></p>`;
-    document.getElementById(`${prefix}-contact-editor`)!.innerHTML = `
-      <form id="${prefix}-contact-form" class="contact-form">
-        <div><label for="${prefix}-contact-name">Contact name</label>
-          <input id="${prefix}-contact-name" type="text" maxlength="80" required></div>
-        <div><label for="${prefix}-contact-email">Contact email</label>
-          <input id="${prefix}-contact-email" type="email" maxlength="254" required></div>
+  private mount(slot: BindingSlot): ContactView {
+    document.getElementById(`${slot}-contact-picker`)!.innerHTML = `
+      <label for="${slot}-contact">Saved contact</label>
+      <select id="${slot}-contact" disabled><option value="">Unsaved key</option></select>
+      <p id="${slot}-key-warning" class="key-warning" role="alert" hidden></p>`;
+    document.getElementById(`${slot}-contact-editor`)!.innerHTML = `
+      <form id="${slot}-contact-form" class="contact-form">
+        <div><label for="${slot}-contact-name">Contact name</label>
+          <input id="${slot}-contact-name" type="text" maxlength="80" required></div>
+        <div><label for="${slot}-contact-email">Contact email</label>
+          <input id="${slot}-contact-email" type="email" maxlength="254" required></div>
         <div class="button-row">
-          <button id="${prefix}-save-contact" class="secondary-button" type="submit" disabled>Save as contact</button>
-          <button id="${prefix}-delete-contact" class="danger-button" type="button" hidden>Delete contact</button>
+          <button id="${slot}-save-contact" class="secondary-button" type="submit" disabled>Save as contact</button>
+          <button id="${slot}-delete-contact" class="danger-button" type="button" hidden>Delete contact</button>
         </div>
       </form>
       <details class="contact-history"><summary>Verification history</summary>
-        <div id="${prefix}-contact-history"></div></details>`;
+        <div id="${slot}-contact-history"></div></details>`;
     const view: ContactView = {
-      prefix,
-      select: document.getElementById(`${prefix}-contact`) as HTMLSelectElement,
-      name: document.getElementById(`${prefix}-contact-name`) as HTMLInputElement,
-      email: document.getElementById(`${prefix}-contact-email`) as HTMLInputElement,
-      save: document.getElementById(`${prefix}-save-contact`) as HTMLButtonElement,
-      remove: document.getElementById(`${prefix}-delete-contact`) as HTMLButtonElement,
-      warning: document.getElementById(`${prefix}-key-warning`) as HTMLParagraphElement,
-      history: document.getElementById(`${prefix}-contact-history`) as HTMLDivElement
+      slot,
+      select: document.getElementById(`${slot}-contact`) as HTMLSelectElement,
+      name: document.getElementById(`${slot}-contact-name`) as HTMLInputElement,
+      email: document.getElementById(`${slot}-contact-email`) as HTMLInputElement,
+      save: document.getElementById(`${slot}-save-contact`) as HTMLButtonElement,
+      remove: document.getElementById(`${slot}-delete-contact`) as HTMLButtonElement,
+      warning: document.getElementById(`${slot}-key-warning`) as HTMLParagraphElement,
+      history: document.getElementById(`${slot}-contact-history`) as HTMLDivElement,
+      keyText: document.getElementById(`${slot}-public-key`) as HTMLTextAreaElement
     };
     view.select.addEventListener("change", () => {
       const id = view.select.value;
-      this.setKey(role);
+      this.setKey(slot);
       view.contact = undefined;
       this.actions.changed();
       void this.actions.run("Loading contact...", async () => {
-        if (id) await this.apply(role, await this.store.get(id));
-        else this.clearView(role);
+        if (id) await this.apply(slot, await this.store.get(id));
+        else this.clearView(slot);
         this.actions.changed();
         this.actions.status(id ? "Contact loaded." : "Using an unsaved public key.");
       }).then(() => view.select.focus());
     });
-    document.getElementById(`${prefix}-contact-form`)!.addEventListener("submit", (event) => {
+    document.getElementById(`${slot}-contact-form`)!.addEventListener("submit", (event) => {
       event.preventDefault();
       void this.actions.run("Saving contact...", async () => {
         if (view.contact) {
           const updated = await this.store.updateDetails(view.contact.id, view.contact.revision, view.name.value, view.email.value);
           await this.applyToBindings(updated);
         } else {
-          if (!this.fingerprint(role)) throw new Error("Import a public key before saving this contact.");
-          const pem = (document.getElementById(`${prefix}-public-key`) as HTMLTextAreaElement).value;
-          await this.apply(role, await this.store.create(view.name.value, view.email.value, role, pem));
+          if (!this.fingerprint(slot)) throw new Error("Import a public key before saving this contact.");
+          if (this.isOwnKey(slot)) throw new Error("This is your own key. It is already saved in your identity vault.");
+          await this.apply(slot, await this.store.create(view.name.value, view.email.value, view.keyText.value));
         }
         await this.reloadList();
         this.actions.changed();
@@ -179,11 +196,11 @@ export class ContactController {
     });
     view.remove.addEventListener("click", async () => {
       const contact = view.contact;
-      if (!contact || !await this.actions.confirm("Delete contact?", `Delete ${contact.name} and its saved keys, trust, and key-change history?`)) return;
+      if (!contact || !await this.actions.confirm("Delete contact?", `Delete ${contact.name} and its saved key, trust, and key-change history?`)) return;
       await this.actions.run("Deleting contact...", async () => {
         await this.store.delete(contact.id, contact.revision);
-        for (const otherRole of ["encryption", "verification"] as const) {
-          if (this.views[otherRole].contact?.id === contact.id) this.clearView(otherRole);
+        for (const other of SLOTS) {
+          if (this.views[other].contact?.id === contact.id) this.clearView(other);
         }
         await this.reloadList();
         this.actions.changed();
@@ -194,30 +211,30 @@ export class ContactController {
     return view;
   }
 
-  private async apply(role: ContactKeyRole, contact: Contact): Promise<void> {
-    const view = this.views[role];
-    const saved = contact.keys[role];
-    const normalized = saved ? await normalizeContactKey(role, saved.publicKeyPem) : undefined;
+  private async apply(slot: BindingSlot, contact: Contact): Promise<void> {
+    const view = this.views[slot];
+    const parsed = await normalizeContactKey(contact.key.publicKeyArmored);
     view.contact = contact;
     view.select.value = contact.id;
     view.name.value = contact.name;
     view.email.value = contact.email;
-    (document.getElementById(`${view.prefix}-public-key`) as HTMLTextAreaElement).value = saved?.publicKeyPem ?? "";
-    this.setKey(role, normalized?.publicKey, normalized?.fingerprint);
-    if (saved?.status === "verified") {
-      if (role === "encryption") this.session.recipientTrust = markPublicKeyVerified(this.session.recipientTrust!);
-      else this.session.senderTrust = markPublicKeyVerified(this.session.senderTrust!);
+    view.keyText.value = contact.key.publicKeyArmored;
+    this.setKey(slot, parsed.key, parsed.fingerprint);
+    if (contact.key.status === "verified" && contact.key.fingerprint === parsed.fingerprint) {
+      const trust = slot === "recipient" ? this.session.recipientTrust : this.session.senderTrust;
+      this.setTrust(slot, markPublicKeyVerified(trust!));
     }
     this.render();
   }
 
-  private async applyToBindings(contact: Contact, forceRole?: ContactKeyRole): Promise<void> {
-    for (const role of ["encryption", "verification"] as const) {
-      const view = this.views[role];
+  private async applyToBindings(contact: Contact, forceSlot?: BindingSlot): Promise<void> {
+    for (const slot of SLOTS) {
+      const view = this.views[slot];
       if (view.contact?.id !== contact.id) continue;
-      // Preserve an edited PEM draft in the other role instead of restoring its saved trust.
-      if (role === forceRole || (this.fingerprint(role) && this.fingerprint(role) === view.contact.keys[role]?.fingerprint)) {
-        await this.apply(role, contact);
+      // Re-apply only where the card still shows the saved key, so an unsaved draft is never
+      // replaced by restored trust.
+      if (slot === forceSlot || (this.fingerprint(slot) && this.fingerprint(slot) === view.contact.key.fingerprint)) {
+        await this.apply(slot, contact);
       } else {
         view.contact = contact;
         view.name.value = contact.name;
@@ -227,14 +244,14 @@ export class ContactController {
     this.render();
   }
 
-  private clearView(role: ContactKeyRole): void {
-    const view = this.views[role];
+  private clearView(slot: BindingSlot): void {
+    const view = this.views[slot];
     view.contact = undefined;
     view.select.value = "";
     view.name.value = "";
     view.email.value = "";
-    (document.getElementById(`${view.prefix}-public-key`) as HTMLTextAreaElement).value = "";
-    this.setKey(role);
+    view.keyText.value = "";
+    this.setKey(slot);
     this.render();
   }
 
@@ -248,40 +265,48 @@ export class ContactController {
   }
 
   private render(): void {
-    for (const role of ["encryption", "verification"] as const) {
-      const view = this.views[role];
-      const key = view.contact?.keys[role];
-      const changed = key?.status === "changed" && key.fingerprint === this.fingerprint(role);
+    for (const slot of SLOTS) {
+      const view = this.views[slot];
+      const key = view.contact?.key;
+      const own = this.isOwnKey(slot);
+      const changed = key?.status === "changed" && key.fingerprint === this.fingerprint(slot);
+      const displayName = own ? "You" : view.contact?.name ?? DEFAULT_NAMES[slot];
       view.select.disabled = this.busy || !this.ready;
       view.name.disabled = this.busy || !this.ready;
       view.email.disabled = this.busy || !this.ready;
-      view.save.disabled = this.busy || !this.ready || (!view.contact && !this.fingerprint(role));
+      view.save.disabled = this.busy || !this.ready || own || (!view.contact && !this.fingerprint(slot));
       view.save.textContent = view.contact ? "Save contact details" : "Save as contact";
       view.remove.hidden = !view.contact;
       view.remove.disabled = this.busy;
       view.warning.hidden = !changed;
       view.warning.textContent = changed ? "Key changed. Compare this fingerprint again before use." : "";
-      document.getElementById(`${view.prefix}-key-name`)!.textContent = view.contact?.name ?? (role === "encryption" ? "Alice" : "Pavel");
-      document.getElementById(`${view.prefix}-verification-label`)!.textContent =
-        `I compared this fingerprint with ${view.contact?.name ?? (role === "encryption" ? "Alice" : "Pavel")} through a separate trusted channel.`;
+      document.getElementById(`${slot}-key-name`)!.textContent = displayName;
+      document.getElementById(`${slot}-verification-label`)!.textContent = own
+        ? "This is your own key from your identity vault."
+        : `I compared this fingerprint with ${displayName} through a separate trusted channel.`;
       view.history.replaceChildren();
       const summary = document.createElement("p");
-      summary.textContent = key ? `First seen: ${key.firstSeenAt}. Verified: ${key.verifiedAt ?? "not verified"}.` : "No saved key for this role.";
+      summary.textContent = key ? `First seen: ${key.firstSeenAt}. Verified: ${key.verifiedAt ?? "not verified"}.` : "No saved key for this binding.";
       view.history.append(summary);
       for (const change of key?.changes ?? []) {
         const item = document.createElement("p");
-        item.textContent = `${change.changedAt}: ${change.previousFingerprint} -> ${change.fingerprint}. Previous verification: ${change.previousVerifiedAt ?? "unverified"}.`;
+        item.textContent = `${change.changedAt}: ${formatFingerprint(change.previousFingerprint)} -> ${formatFingerprint(change.fingerprint)}. Previous verification: ${change.previousVerifiedAt ?? "unverified"}.`;
         view.history.append(item);
       }
     }
   }
 
-  private fingerprint(role: ContactKeyRole): string | undefined {
-    return role === "encryption" ? this.session.recipientFingerprint : this.session.senderFingerprint;
+  private fingerprint(slot: BindingSlot): string | undefined {
+    return slot === "recipient" ? this.session.recipientFingerprint : this.session.senderFingerprint;
   }
 
-  private setKey(role: ContactKeyRole, key?: CryptoKey, fingerprint?: string): void {
-    if (role === "encryption") this.session.setRecipientKey(key, fingerprint);
+  private setKey(slot: BindingSlot, key?: openpgp.PublicKey, fingerprint?: string): void {
+    if (slot === "recipient") this.session.setRecipientKey(key, fingerprint);
     else this.session.setSenderKey(key, fingerprint);
+  }
+
+  private setTrust(slot: BindingSlot, trust: ReturnType<typeof markPublicKeyVerified>): void {
+    if (slot === "recipient") this.session.recipientTrust = trust;
+    else this.session.senderTrust = trust;
   }
 }

@@ -107,3 +107,8 @@ dialog p { color: #52606a; font-size: 0.9rem; }
   .vault-controls > button { flex: 1 1 100%; }
   .passphrase-field { flex-basis: 100%; max-width: none; }
 }
+.identity-summary { margin-top: 14px; }
+.identity-summary .fingerprint-value { min-height: 0; margin-top: 4px; }
+.identity-summary .button-row button { flex: 0 1 220px; }
+#identity-fields { flex: 2 1 420px; }
+#identity-fields[hidden] { display: none; }

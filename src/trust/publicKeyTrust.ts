@@ -1,4 +1,4 @@
-import { isPublicKeyFingerprint } from "../crypto/publicKeyFingerprint";
+import { isOpenPgpFingerprint } from "../pgp/keys";
 
 export type PublicKeyTrustStatus = "unverified" | "verified";
 
@@ -48,7 +48,7 @@ export function isPublicKeyVerified(
 }
 
 function validateFingerprint(fingerprint: string): void {
-  if (!isPublicKeyFingerprint(fingerprint)) {
-    throw new Error("Trust state requires a valid SHA-256 public-key fingerprint.");
+  if (!isOpenPgpFingerprint(fingerprint)) {
+    throw new Error("Trust state requires a valid OpenPGP fingerprint.");
   }
 }

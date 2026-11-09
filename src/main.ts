@@ -1,28 +1,20 @@
 import "./style.css";
 import {
-  createDemoKeyVault,
-  decryptDemoMessage,
-  encryptDemoMessage,
-  exportDemoPublicKeys,
-  fingerprintDemoPublicKeys,
-  formatEncryptedMessage,
-  generateDemoKeys,
-  parseEncryptedMessage,
-  unlockDemoKeyVault,
-  type DemoKeys
-} from "./demo";
-import {
-  PRIVATE_KEY_VAULT_MAX_PASSPHRASE_LENGTH,
-  PRIVATE_KEY_VAULT_MIN_PASSPHRASE_LENGTH
-} from "./crypto/privateKeyVault";
-import {
-  deletePrivateKeyVault,
-  loadPrivateKeyVault,
-  savePrivateKeyVault
-} from "./storage/privateKeyVaultStorage";
+  createIdentityVault,
+  createTemporaryIdentity,
+  IDENTITY_VAULT_MAX_PASSPHRASE_LENGTH,
+  IDENTITY_VAULT_MIN_PASSPHRASE_LENGTH,
+  unlockIdentityVault,
+  type UnlockedIdentity
+} from "./pgp/identityVault";
+import { formatFingerprint } from "./pgp/keys";
+import { decryptMessage, encryptMessage, getKeyIds, getMessageRecipientKeyIds } from "./pgp/message";
+import { deleteIdentityVault, loadIdentityVault, saveIdentityVault } from "./storage/identityVaultStorage";
 import { isPublicKeyVerified } from "./trust/publicKeyTrust";
 import { getVaultView, KeySession, type ActiveKeySource } from "./ui/keySession";
 import { ContactController } from "./ui/contactController";
+
+const TEMPORARY_IDENTITY = { name: "Temporary identity", email: "temporary@example.invalid" };
 
 const session = new KeySession();
 let vaultExists = false;
@@ -32,9 +24,47 @@ let isBusy = false;
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("App root was not found.");
 
-const passphraseAttributes = `type="password" minlength="${PRIVATE_KEY_VAULT_MIN_PASSPHRASE_LENGTH}"
-  maxlength="${PRIVATE_KEY_VAULT_MAX_PASSPHRASE_LENGTH}" autocomplete="new-password"
+const passphraseAttributes = `type="password" minlength="${IDENTITY_VAULT_MIN_PASSPHRASE_LENGTH}"
+  maxlength="${IDENTITY_VAULT_MAX_PASSPHRASE_LENGTH}" autocomplete="new-password"
   autocapitalize="none" spellcheck="false" required`;
+
+function identityFields(prefix: string): string {
+  return `
+    <div class="passphrase-field">
+      <label for="${prefix}-name">Your name</label>
+      <input id="${prefix}-name" type="text" maxlength="80" autocomplete="name" required>
+    </div>
+    <div class="passphrase-field">
+      <label for="${prefix}-email">Your email</label>
+      <input id="${prefix}-email" type="email" maxlength="254" autocomplete="email" required>
+    </div>`;
+}
+
+function keyCard(slot: "recipient" | "sender", role: string, textLabel: string, importLabel: string): string {
+  return `
+    <article class="key-card">
+      <div class="key-heading">
+        <h3><span id="${slot}-key-name" class="key-name"></span><span>${role}</span></h3>
+        <span id="${slot}-trust-status" class="trust-status">Unverified</span>
+      </div>
+      <div id="${slot}-contact-picker" class="contact-picker"></div>
+      <code id="${slot}-fingerprint" class="fingerprint-value" aria-label="OpenPGP fingerprint">No key loaded</code>
+      <label class="trust-checkbox" for="verify-${slot}-key">
+        <input id="verify-${slot}-key" type="checkbox" disabled>
+        <span id="${slot}-verification-label"></span>
+      </label>
+      <details id="${slot}-key-details" class="key-details">
+        <summary>Public key text</summary>
+        <label for="${slot}-public-key">${textLabel}</label>
+        <textarea id="${slot}-public-key" class="public-key-input" spellcheck="false" placeholder="Paste an armored OpenPGP public key"></textarea>
+        <div class="button-row">
+          <button id="copy-${slot}-key" class="secondary-button" type="button" disabled>Copy public key</button>
+          <button id="import-${slot}-key" type="button" disabled>${importLabel}</button>
+        </div>
+        <div id="${slot}-contact-editor"></div>
+      </details>
+    </article>`;
+}
 
 app.innerHTML = `
   <main class="app-shell">
@@ -44,21 +74,28 @@ app.innerHTML = `
     </header>
     <p id="operation-status" class="operation-status" role="status" aria-live="polite" aria-atomic="true">Ready</p>
 
-    <section class="key-vault-section" aria-label="Key vault">
+    <section class="key-vault-section" aria-label="Identity vault">
       <form id="vault-form" class="vault-controls">
+        <div id="identity-fields" class="vault-controls">${identityFields("identity")}</div>
         <div id="passphrase-field" class="passphrase-field">
           <label for="vault-passphrase">Vault passphrase</label>
           <input id="vault-passphrase" ${passphraseAttributes}>
         </div>
-        <button id="vault-action" type="submit" disabled>Create vault</button>
+        <button id="vault-action" type="submit" disabled>Create identity</button>
       </form>
+      <div id="identity-summary" class="identity-summary" hidden>
+        <p><span id="identity-user-id" class="key-name"></span></p>
+        <code id="identity-fingerprint" class="fingerprint-value" aria-label="Your OpenPGP fingerprint"></code>
+        <div class="button-row"><button id="copy-identity-key" class="secondary-button" type="button">Copy my public key</button></div>
+      </div>
       <details id="advanced-key-options" class="advanced-options">
         <summary>Advanced key options</summary>
         <div class="advanced-actions">
-          <button id="generate-keys" class="secondary-button" type="button">Use temporary keys</button>
+          <button id="generate-keys" class="secondary-button" type="button">Use a temporary identity</button>
           <button id="delete-vault" class="danger-button" type="button" hidden>Delete vault</button>
         </div>
         <form id="replace-vault-form" class="vault-controls" hidden>
+          ${identityFields("replace")}
           <div class="passphrase-field">
             <label for="new-vault-passphrase">New vault passphrase</label>
             <input id="new-vault-passphrase" ${passphraseAttributes}>
@@ -71,50 +108,8 @@ app.innerHTML = `
     <section class="public-key-section" aria-labelledby="public-key-heading">
       <h2 id="public-key-heading">Key verification</h2>
       <div class="public-key-grid">
-        <article class="key-card">
-          <div class="key-heading">
-            <h3><span id="alice-key-name" class="key-name">Alice</span><span>Encryption key</span></h3>
-            <span id="alice-trust-status" class="trust-status">Unverified</span>
-          </div>
-          <div id="alice-contact-picker" class="contact-picker"></div>
-          <code id="alice-fingerprint" class="fingerprint-value" aria-label="Alice's SHA-256 fingerprint">No key loaded</code>
-          <label class="trust-checkbox" for="verify-alice-key">
-            <input id="verify-alice-key" type="checkbox" disabled>
-            <span id="alice-verification-label">I compared this fingerprint with Alice through a separate trusted channel.</span>
-          </label>
-          <details id="alice-key-details" class="key-details">
-            <summary>Public key text</summary>
-            <label for="alice-public-key">Recipient public encryption key</label>
-            <textarea id="alice-public-key" class="public-key-input" spellcheck="false" placeholder="Paste a public key in PEM format"></textarea>
-            <div class="button-row">
-              <button id="copy-alice-key" class="secondary-button" type="button" disabled>Copy public key</button>
-              <button id="import-alice-key" type="button" disabled>Import for encryption</button>
-            </div>
-            <div id="alice-contact-editor"></div>
-          </details>
-        </article>
-        <article class="key-card">
-          <div class="key-heading">
-            <h3><span id="pavel-key-name" class="key-name">Pavel</span><span>Signature-verification key</span></h3>
-            <span id="pavel-trust-status" class="trust-status">Unverified</span>
-          </div>
-          <div id="pavel-contact-picker" class="contact-picker"></div>
-          <code id="pavel-fingerprint" class="fingerprint-value" aria-label="Pavel's SHA-256 fingerprint">No key loaded</code>
-          <label class="trust-checkbox" for="verify-pavel-key">
-            <input id="verify-pavel-key" type="checkbox" disabled>
-            <span id="pavel-verification-label">I compared this fingerprint with Pavel through a separate trusted channel.</span>
-          </label>
-          <details id="pavel-key-details" class="key-details">
-            <summary>Public key text</summary>
-            <label for="pavel-public-key">Sender public verification key</label>
-            <textarea id="pavel-public-key" class="public-key-input" spellcheck="false" placeholder="Paste a public key in PEM format"></textarea>
-            <div class="button-row">
-              <button id="copy-pavel-key" class="secondary-button" type="button" disabled>Copy public key</button>
-              <button id="import-pavel-key" type="button" disabled>Import for verification</button>
-            </div>
-            <div id="pavel-contact-editor"></div>
-          </details>
-        </article>
+        ${keyCard("recipient", "Encrypt to", "Recipient OpenPGP public key", "Import recipient key")}
+        ${keyCard("sender", "Expected signer", "Sender OpenPGP public key", "Import sender key")}
       </div>
     </section>
 
@@ -122,28 +117,26 @@ app.innerHTML = `
       <h2 id="message-heading">Message</h2>
       <div class="workspace-grid">
         <div class="message-column">
-          <label for="plaintext">Sender message</label>
+          <label for="plaintext">Message to send</label>
           <textarea id="plaintext" spellcheck="true">Meet me at 4 PM.</textarea>
-          <button id="encrypt" type="button" disabled>Encrypt</button>
+          <button id="encrypt" type="button" disabled>Sign and encrypt</button>
         </div>
         <div class="message-column">
           <label for="decrypted-message">Decrypted message</label>
           <output id="decrypted-message">Nothing decrypted yet</output>
-          <button id="decrypt" type="button" disabled>Decrypt</button>
+          <button id="decrypt" type="button" disabled>Decrypt and verify</button>
         </div>
       </div>
       <details id="package-details" class="package-details">
-        <summary>Encrypted package details</summary>
+        <summary>Encrypted message (OpenPGP)</summary>
         <div class="package-heading">
-          <label for="encrypted-package">Encrypted package</label>
+          <label for="encrypted-package">Armored OpenPGP message</label>
           <button id="tamper-ciphertext" class="secondary-button" type="button" disabled>Tamper ciphertext</button>
         </div>
-        <textarea id="encrypted-package" spellcheck="false" placeholder="Encrypted JSON appears here"></textarea>
-        <dl class="field-list" aria-label="Encrypted package fields">
-          <div><dt>encryptedSessionKey</dt><dd>RSA-OAEP wrapped AES-256 session key</dd></div>
-          <div><dt>nonce</dt><dd>96-bit AES-GCM nonce</dd></div>
-          <div><dt>ciphertext</dt><dd>AES-GCM ciphertext with authentication tag</dd></div>
-          <div><dt>signature</dt><dd>RSA-PSS signature over the deterministic package fields</dd></div>
+        <textarea id="encrypted-package" spellcheck="false" placeholder="-----BEGIN PGP MESSAGE----- appears here, or paste one from GnuPG, Thunderbird, Proton, or Mailvelope"></textarea>
+        <dl class="field-list" aria-label="Message details">
+          <div><dt>Encrypted to</dt><dd id="message-recipients">No message</dd></div>
+          <div><dt>Format</dt><dd>Signed, then encrypted (RFC 9580, v4 keys): one session key wrapped per recipient, including you</dd></div>
         </dl>
       </details>
     </section>
@@ -160,31 +153,29 @@ app.innerHTML = `
 
 const vaultForm = getElement<HTMLFormElement>("vault-form");
 const vaultActionButton = getElement<HTMLButtonElement>("vault-action");
+const identityFieldsGroup = getElement<HTMLDivElement>("identity-fields");
+const identityNameInput = getElement<HTMLInputElement>("identity-name");
+const identityEmailInput = getElement<HTMLInputElement>("identity-email");
 const passphraseField = getElement<HTMLDivElement>("passphrase-field");
 const vaultPassphraseInput = getElement<HTMLInputElement>("vault-passphrase");
+const identitySummary = getElement<HTMLDivElement>("identity-summary");
+const identityUserId = getElement<HTMLSpanElement>("identity-user-id");
+const identityFingerprint = getElement<HTMLElement>("identity-fingerprint");
+const copyIdentityKeyButton = getElement<HTMLButtonElement>("copy-identity-key");
 const advancedOptions = getElement<HTMLDetailsElement>("advanced-key-options");
 const replaceVaultForm = getElement<HTMLFormElement>("replace-vault-form");
 const replaceVaultButton = getElement<HTMLButtonElement>("replace-vault");
+const replaceNameInput = getElement<HTMLInputElement>("replace-name");
+const replaceEmailInput = getElement<HTMLInputElement>("replace-email");
 const newVaultPassphraseInput = getElement<HTMLInputElement>("new-vault-passphrase");
 const generateKeysButton = getElement<HTMLButtonElement>("generate-keys");
 const deleteVaultButton = getElement<HTMLButtonElement>("delete-vault");
 const encryptButton = getElement<HTMLButtonElement>("encrypt");
 const decryptButton = getElement<HTMLButtonElement>("decrypt");
 const tamperCiphertextButton = getElement<HTMLButtonElement>("tamper-ciphertext");
-const copyAliceKeyButton = getElement<HTMLButtonElement>("copy-alice-key");
-const importAliceKeyButton = getElement<HTMLButtonElement>("import-alice-key");
-const copyPavelKeyButton = getElement<HTMLButtonElement>("copy-pavel-key");
-const importPavelKeyButton = getElement<HTMLButtonElement>("import-pavel-key");
-const verifyAliceKeyCheckbox = getElement<HTMLInputElement>("verify-alice-key");
-const verifyPavelKeyCheckbox = getElement<HTMLInputElement>("verify-pavel-key");
 const plaintextInput = getElement<HTMLTextAreaElement>("plaintext");
 const encryptedPackageInput = getElement<HTMLTextAreaElement>("encrypted-package");
-const alicePublicKeyInput = getElement<HTMLTextAreaElement>("alice-public-key");
-const pavelPublicKeyInput = getElement<HTMLTextAreaElement>("pavel-public-key");
-const aliceFingerprintOutput = getElement<HTMLElement>("alice-fingerprint");
-const pavelFingerprintOutput = getElement<HTMLElement>("pavel-fingerprint");
-const aliceTrustStatus = getElement<HTMLSpanElement>("alice-trust-status");
-const pavelTrustStatus = getElement<HTMLSpanElement>("pavel-trust-status");
+const messageRecipients = getElement<HTMLElement>("message-recipients");
 const decryptedMessageOutput = getElement<HTMLOutputElement>("decrypted-message");
 const operationStatus = getElement<HTMLParagraphElement>("operation-status");
 const vaultStatus = getElement<HTMLSpanElement>("vault-status");
@@ -192,6 +183,17 @@ const confirmationDialog = getElement<HTMLDialogElement>("vault-confirmation");
 const confirmationTitle = getElement<HTMLHeadingElement>("confirmation-title");
 const confirmationMessage = getElement<HTMLParagraphElement>("confirmation-message");
 const confirmVaultActionButton = getElement<HTMLButtonElement>("confirm-vault-action");
+
+const cards = (["recipient", "sender"] as const).map((slot) => ({
+  slot,
+  keyInput: getElement<HTMLTextAreaElement>(`${slot}-public-key`),
+  copyButton: getElement<HTMLButtonElement>(`copy-${slot}-key`),
+  importButton: getElement<HTMLButtonElement>(`import-${slot}-key`),
+  verifyCheckbox: getElement<HTMLInputElement>(`verify-${slot}-key`),
+  fingerprint: getElement<HTMLElement>(`${slot}-fingerprint`),
+  trustStatus: getElement<HTMLSpanElement>(`${slot}-trust-status`)
+}));
+
 const contactController = new ContactController(session, {
   run: runOperation,
   changed: () => {
@@ -209,24 +211,23 @@ vaultForm.addEventListener("submit", async (event) => {
   const { mode } = getVaultView(vaultExists, session.source);
   if (mode === "unlocked" || mode === "temporary") {
     clearActiveKeys();
-    setStatus(mode === "unlocked" ? "Vault locked." : "Temporary keys cleared.");
+    setStatus(mode === "unlocked" ? "Vault locked." : "Temporary identity cleared.");
     focusVaultControl();
     return;
   }
   if (!storageReady) return;
   if (mode === "setup") {
-    await createAndSaveVault(vaultPassphraseInput);
+    await createAndSaveVault(identityNameInput, identityEmailInput, vaultPassphraseInput);
     return;
   }
   await runOperation("Unlocking vault...", async () => {
-    const vault = await loadPrivateKeyVault();
+    const vault = await loadIdentityVault();
     if (vault === undefined) {
       vaultExists = false;
-      throw new Error("No saved vault was found in this browser.");
+      throw new Error("No saved identity was found in this browser.");
     }
-    const keys = await unlockDemoKeyVault(vault, vaultPassphraseInput.value);
-    await activateDemoKeys(keys, "vault");
-    setStatus("Vault unlocked. Compare both fingerprints before use.");
+    activateIdentity(await unlockIdentityVault(vault, vaultPassphraseInput.value), "vault");
+    setStatus("Vault unlocked. Your own key is selected on both cards.");
     focusVaultControl();
   });
 });
@@ -234,14 +235,14 @@ vaultForm.addEventListener("submit", async (event) => {
 replaceVaultForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   if (isBusy || !storageReady) return;
-  await createAndSaveVault(newVaultPassphraseInput);
+  await createAndSaveVault(replaceNameInput, replaceEmailInput, newVaultPassphraseInput);
 });
 
 generateKeysButton.addEventListener("click", async () => {
-  await runOperation("Generating temporary keys...", async () => {
-    await activateDemoKeys(await generateDemoKeys(), "ephemeral");
+  await runOperation("Generating temporary identity...", async () => {
+    activateIdentity(await createTemporaryIdentity(TEMPORARY_IDENTITY), "ephemeral");
     advancedOptions.open = false;
-    setStatus("Temporary keys ready. Compare both fingerprints before use.");
+    setStatus("Temporary identity ready. It is not saved.");
     focusVaultControl();
   });
 });
@@ -249,36 +250,42 @@ generateKeysButton.addEventListener("click", async () => {
 deleteVaultButton.addEventListener("click", async () => {
   if (isBusy || !vaultExists || !await confirmVaultAction("delete")) return;
   await runOperation("Deleting vault...", async () => {
-    await deletePrivateKeyVault();
+    await deleteIdentityVault();
     vaultExists = false;
     if (session.source === "vault") clearActiveKeys();
     advancedOptions.open = false;
-    setStatus("Saved vault deleted.");
+    setStatus("Saved identity deleted.");
     focusVaultControl();
   });
 });
 
 encryptButton.addEventListener("click", async () => {
-  if (!session.canEncrypt || !session.keys || !session.recipientPublicKey) return;
-  await runOperation("Encrypting message...", async () => {
-    await contactController.checkBeforeUse("encryption");
-    if (!session.canEncrypt || !session.keys || !session.recipientPublicKey) throw new Error("Verify the current recipient key before encryption.");
-    const encrypted = await encryptDemoMessage(plaintextInput.value, session.keys, session.recipientPublicKey);
-    encryptedPackageInput.value = formatEncryptedMessage(encrypted);
+  if (!session.canEncrypt) return;
+  await runOperation("Signing and encrypting...", async () => {
+    await contactController.checkBeforeUse("recipient");
+    if (!session.canEncrypt || !session.identity || !session.recipientPublicKey) {
+      throw new Error("Verify the current recipient key before encryption.");
+    }
+    encryptedPackageInput.value = await encryptMessage(plaintextInput.value, [session.recipientPublicKey], session.identity.privateKey);
     decryptedMessageOutput.textContent = "Nothing decrypted yet";
-    setStatus("Encrypted and signed package ready.");
+    await renderMessageRecipients();
+    setStatus(contactController.isOwnKey("recipient")
+      ? "Signed and encrypted to yourself."
+      : "Signed and encrypted to the recipient and to yourself.");
   });
 });
 
 decryptButton.addEventListener("click", async () => {
-  if (!session.canDecrypt || !session.keys || !session.senderPublicKey) return;
-  await runOperation("Verifying and decrypting...", async () => {
+  if (!session.canDecrypt) return;
+  await runOperation("Decrypting and verifying...", async () => {
     try {
-      await contactController.checkBeforeUse("verification");
-      if (!session.canDecrypt || !session.keys || !session.senderPublicKey) throw new Error("Verify the current sender key before decryption.");
-      const plaintext = await decryptDemoMessage(parseEncryptedMessage(encryptedPackageInput.value), session.keys, session.senderPublicKey);
-      decryptedMessageOutput.textContent = plaintext || "(empty message)";
-      setStatus("Signature verified. Message decrypted.");
+      await contactController.checkBeforeUse("sender");
+      if (!session.canDecrypt || !session.identity || !session.senderPublicKey) {
+        throw new Error("Verify the current sender key before decryption.");
+      }
+      const result = await decryptMessage(encryptedPackageInput.value, session.identity.privateKey, [session.senderPublicKey]);
+      decryptedMessageOutput.textContent = result.text || "(empty message)";
+      setStatus(`Signature verified (${formatFingerprint(result.signerFingerprint)}). Message decrypted.`);
     } catch (error) {
       decryptedMessageOutput.textContent = "Decryption failed";
       throw error;
@@ -288,73 +295,69 @@ decryptButton.addEventListener("click", async () => {
 
 tamperCiphertextButton.addEventListener("click", () => {
   if (isBusy) return;
-  try {
-    const encrypted = parseEncryptedMessage(encryptedPackageInput.value);
-    encrypted.ciphertext = `${encrypted.ciphertext.startsWith("A") ? "B" : "A"}${encrypted.ciphertext.slice(1)}`;
-    encryptedPackageInput.value = formatEncryptedMessage(encrypted);
-    decryptedMessageOutput.textContent = "Nothing decrypted yet";
-    setStatus("Ciphertext changed. Decryption should now fail.");
-  } catch (error) {
-    setStatus(formatError(error));
+  const lines = encryptedPackageInput.value.split("\n");
+  // Flip one Base64 character in the middle of the armored body.
+  const bodyLines = lines.map((line, index) => ({ line, index }))
+    .filter(({ line }) => line.length > 20 && !line.startsWith("-----") && !line.includes(":"));
+  const target = bodyLines[Math.floor(bodyLines.length / 2)];
+  if (!target) {
+    setStatus("No armored message to tamper with.");
+    return;
   }
+  const position = Math.floor(target.line.length / 2);
+  const replacement = target.line[position] === "A" ? "B" : "A";
+  lines[target.index] = `${target.line.slice(0, position)}${replacement}${target.line.slice(position + 1)}`;
+  encryptedPackageInput.value = lines.join("\n");
+  decryptedMessageOutput.textContent = "Nothing decrypted yet";
+  setStatus("Ciphertext changed. Decryption should now fail.");
 });
 
 encryptedPackageInput.addEventListener("input", () => {
   decryptedMessageOutput.textContent = "Nothing decrypted yet";
-  renderControls();
-});
-alicePublicKeyInput.addEventListener("input", () => {
-  session.setRecipientKey();
-  renderTrust();
-  renderControls();
-});
-pavelPublicKeyInput.addEventListener("input", () => {
-  session.setSenderKey();
-  decryptedMessageOutput.textContent = "Nothing decrypted yet";
-  renderTrust();
+  void renderMessageRecipients();
   renderControls();
 });
 
-copyAliceKeyButton.addEventListener("click", () => void copyPublicKey(alicePublicKeyInput.value));
-copyPavelKeyButton.addEventListener("click", () => void copyPublicKey(pavelPublicKeyInput.value));
-
-importAliceKeyButton.addEventListener("click", async () => {
-  await runOperation("Importing recipient key...", async () => {
-    await contactController.importKey("encryption", alicePublicKeyInput.value);
+for (const card of cards) {
+  card.keyInput.addEventListener("input", () => {
+    if (card.slot === "recipient") session.setRecipientKey();
+    else session.setSenderKey();
+    decryptedMessageOutput.textContent = "Nothing decrypted yet";
     renderTrust();
+    renderControls();
   });
-  importAliceKeyButton.focus();
-});
-importPavelKeyButton.addEventListener("click", async () => {
-  await runOperation("Importing sender key...", async () => {
-    await contactController.importKey("verification", pavelPublicKeyInput.value);
-    renderTrust();
+  card.copyButton.addEventListener("click", () => void copyText(card.keyInput.value, "Public key copied."));
+  card.importButton.addEventListener("click", async () => {
+    await runOperation(`Importing ${card.slot} key...`, async () => {
+      await contactController.importKey(card.slot, card.keyInput.value);
+      renderTrust();
+    });
+    card.importButton.focus();
   });
-  importPavelKeyButton.focus();
+  card.verifyCheckbox.addEventListener("change", () => {
+    const trust = card.slot === "recipient" ? session.recipientTrust : session.senderTrust;
+    if (!trust || isBusy) return;
+    const verified = card.verifyCheckbox.checked;
+    void runOperation("Updating verification...", () => contactController.setVerified(card.slot, verified))
+      .then(() => card.verifyCheckbox.focus());
+  });
+}
+
+copyIdentityKeyButton.addEventListener("click", () => {
+  if (session.identity) void copyText(session.identity.publicKey.armoredKey, "Your public key was copied. Share it, then compare fingerprints.");
 });
 
-verifyAliceKeyCheckbox.addEventListener("change", () => {
-  if (!session.recipientTrust || isBusy) return;
-  const verified = verifyAliceKeyCheckbox.checked;
-  void runOperation("Updating verification...", () => contactController.setVerified("encryption", verified))
-    .then(() => verifyAliceKeyCheckbox.focus());
-});
-verifyPavelKeyCheckbox.addEventListener("change", () => {
-  if (!session.senderTrust || isBusy) return;
-  const verified = verifyPavelKeyCheckbox.checked;
-  void runOperation("Updating verification...", () => contactController.setVerified("verification", verified))
-    .then(() => verifyPavelKeyCheckbox.focus());
-});
-
-async function createAndSaveVault(input: HTMLInputElement): Promise<void> {
+async function createAndSaveVault(name: HTMLInputElement, email: HTMLInputElement, passphrase: HTMLInputElement): Promise<void> {
   if (vaultExists && !await confirmVaultAction("replace")) return;
-  await runOperation("Creating encrypted vault...", async () => {
-    const created = await createDemoKeyVault(input.value);
-    await savePrivateKeyVault(created.vault);
+  await runOperation("Creating identity and encrypted vault...", async () => {
+    const created = await createIdentityVault({ name: name.value, email: email.value }, passphrase.value);
+    await saveIdentityVault(created.vault);
     vaultExists = true;
-    await activateDemoKeys(created.demoKeys, "vault");
+    activateIdentity(created.identity, "vault");
     advancedOptions.open = false;
-    setStatus("Vault saved and unlocked. Compare both fingerprints before use.");
+    name.value = "";
+    email.value = "";
+    setStatus("Identity saved and unlocked. Share your public key and fingerprint with contacts.");
     focusVaultControl();
   });
 }
@@ -362,8 +365,8 @@ async function createAndSaveVault(input: HTMLInputElement): Promise<void> {
 function confirmVaultAction(action: "replace" | "delete"): Promise<boolean> {
   const label = action === "replace" ? "Replace vault" : "Delete vault";
   return confirmAction(`${label}?`, action === "replace"
-    ? "The saved private keys will be replaced. They cannot be recovered afterward."
-    : "The encrypted private-key vault will be deleted from this browser. This cannot be undone.", label);
+    ? "Your saved private key will be replaced. Messages encrypted to it can no longer be read."
+    : "Your encrypted identity will be deleted from this browser. Messages encrypted to it can no longer be read.", label);
 }
 
 function confirmAction(title: string, message: string, label = "Delete contact"): Promise<boolean> {
@@ -374,24 +377,19 @@ function confirmAction(title: string, message: string, label = "Delete contact")
   confirmationDialog.returnValue = "cancel";
   return new Promise((resolve) => {
     confirmationDialog.addEventListener("close", () => {
-      if (confirmationDialog.returnValue !== "confirm") {
-        newVaultPassphraseInput.value = "";
-      }
+      if (confirmationDialog.returnValue !== "confirm") newVaultPassphraseInput.value = "";
       resolve(confirmationDialog.returnValue === "confirm");
     }, { once: true });
     confirmationDialog.showModal();
   });
 }
 
-async function activateDemoKeys(keys: DemoKeys, source: ActiveKeySource): Promise<void> {
-  const [publicKeys, fingerprints] = await Promise.all([
-    exportDemoPublicKeys(keys), fingerprintDemoPublicKeys(keys)
-  ]);
-  session.activate(keys, source, fingerprints);
+function activateIdentity(identity: UnlockedIdentity, source: ActiveKeySource): void {
+  session.activate(identity, source);
   contactController.resetBindings();
-  alicePublicKeyInput.value = publicKeys.aliceEncryptionPublicKey;
-  pavelPublicKeyInput.value = publicKeys.pavelVerificationPublicKey;
+  for (const card of cards) card.keyInput.value = identity.publicKey.armoredKey;
   encryptedPackageInput.value = "";
+  messageRecipients.textContent = "No message";
   decryptedMessageOutput.textContent = "Nothing decrypted yet";
   renderTrust();
   renderControls();
@@ -402,14 +400,32 @@ function clearActiveKeys(): void {
   contactController.resetBindings();
   plaintextInput.value = "";
   encryptedPackageInput.value = "";
+  messageRecipients.textContent = "No message";
   decryptedMessageOutput.textContent = "Nothing decrypted yet";
-  alicePublicKeyInput.value = "";
-  pavelPublicKeyInput.value = "";
+  for (const card of cards) card.keyInput.value = "";
   vaultPassphraseInput.value = "";
   newVaultPassphraseInput.value = "";
   document.querySelectorAll<HTMLDetailsElement>("details").forEach((details) => { details.open = false; });
   renderTrust();
   renderControls();
+}
+
+async function renderMessageRecipients(): Promise<void> {
+  const armored = encryptedPackageInput.value.trim();
+  if (!armored) {
+    messageRecipients.textContent = "No message";
+    return;
+  }
+  try {
+    const ids = await getMessageRecipientKeyIds(armored);
+    const own = session.identity ? getKeyIds(session.identity.publicKey.key) : [];
+    const recipient = session.recipientPublicKey ? getKeyIds(session.recipientPublicKey) : [];
+    messageRecipients.textContent = ids.map((id) => own.includes(id)
+      ? `${id} (you)`
+      : recipient.includes(id) ? `${id} (recipient)` : `${id} (unknown key)`).join(", ") || "No public-key recipients";
+  } catch {
+    messageRecipients.textContent = "Not a readable OpenPGP message";
+  }
 }
 
 function renderControls(): void {
@@ -418,9 +434,19 @@ function renderControls(): void {
   vaultStatus.dataset.mode = view.mode;
   vaultActionButton.textContent = view.primaryLabel;
   vaultActionButton.disabled = isBusy || (view.needsPassphrase && !storageReady);
+  identityFieldsGroup.hidden = !view.needsIdentityDetails;
+  identityNameInput.disabled = isBusy || !view.needsIdentityDetails || !storageReady;
+  identityEmailInput.disabled = identityNameInput.disabled;
   passphraseField.hidden = !view.needsPassphrase;
   vaultPassphraseInput.disabled = isBusy || !view.needsPassphrase || !storageReady;
   vaultPassphraseInput.autocomplete = view.mode === "locked" ? "current-password" : "new-password";
+  identitySummary.hidden = !session.identity;
+  if (session.identity) {
+    const user = session.identity.publicKey.primaryUser;
+    identityUserId.textContent = `${user.name} <${user.email}>`;
+    identityFingerprint.textContent = formatFingerprint(session.identity.publicKey.fingerprint);
+  }
+  copyIdentityKeyButton.disabled = isBusy || !session.identity;
   generateKeysButton.hidden = !view.canUseTemporaryKeys;
   generateKeysButton.disabled = isBusy;
   deleteVaultButton.hidden = !view.canDeleteVault;
@@ -428,34 +454,35 @@ function renderControls(): void {
   replaceVaultForm.hidden = !view.canReplaceVault && !view.canCreateInAdvanced;
   replaceVaultButton.textContent = view.canReplaceVault ? "Replace vault" : "Create vault";
   replaceVaultButton.disabled = isBusy || !storageReady;
-  newVaultPassphraseInput.disabled = isBusy || replaceVaultForm.hidden || !storageReady;
+  for (const input of [replaceNameInput, replaceEmailInput, newVaultPassphraseInput]) {
+    input.disabled = isBusy || replaceVaultForm.hidden || !storageReady;
+  }
   encryptButton.disabled = isBusy || !session.canEncrypt;
   decryptButton.disabled = isBusy || !session.canDecrypt || !encryptedPackageInput.value.trim();
   tamperCiphertextButton.disabled = isBusy || !encryptedPackageInput.value.trim();
-  copyAliceKeyButton.disabled = isBusy || !alicePublicKeyInput.value.trim();
-  importAliceKeyButton.disabled = isBusy || !alicePublicKeyInput.value.trim();
-  copyPavelKeyButton.disabled = isBusy || !pavelPublicKeyInput.value.trim();
-  importPavelKeyButton.disabled = isBusy || !pavelPublicKeyInput.value.trim();
-  verifyAliceKeyCheckbox.disabled = isBusy || !session.recipientTrust;
-  verifyPavelKeyCheckbox.disabled = isBusy || !session.senderTrust;
-  [plaintextInput, encryptedPackageInput, alicePublicKeyInput, pavelPublicKeyInput].forEach((input) => {
-    input.disabled = isBusy;
-  });
+  for (const card of cards) {
+    const trust = card.slot === "recipient" ? session.recipientTrust : session.senderTrust;
+    card.copyButton.disabled = isBusy || !card.keyInput.value.trim();
+    card.importButton.disabled = isBusy || !card.keyInput.value.trim();
+    card.verifyCheckbox.disabled = isBusy || !trust || contactController.isOwnKey(card.slot);
+    card.keyInput.disabled = isBusy;
+  }
+  plaintextInput.disabled = isBusy;
+  encryptedPackageInput.disabled = isBusy;
   app?.setAttribute("aria-busy", String(isBusy));
   contactController.setBusy(isBusy);
 }
 
 function renderTrust(): void {
-  const recipientVerified = isPublicKeyVerified(session.recipientTrust, session.recipientFingerprint);
-  const senderVerified = isPublicKeyVerified(session.senderTrust, session.senderFingerprint);
-  aliceFingerprintOutput.textContent = session.recipientFingerprint || "No key loaded";
-  pavelFingerprintOutput.textContent = session.senderFingerprint || "No key loaded";
-  aliceTrustStatus.textContent = contactController.statusLabel("encryption", recipientVerified);
-  pavelTrustStatus.textContent = contactController.statusLabel("verification", senderVerified);
-  aliceTrustStatus.classList.toggle("is-verified", recipientVerified);
-  pavelTrustStatus.classList.toggle("is-verified", senderVerified);
-  verifyAliceKeyCheckbox.checked = recipientVerified;
-  verifyPavelKeyCheckbox.checked = senderVerified;
+  for (const card of cards) {
+    const recipient = card.slot === "recipient";
+    const fingerprint = recipient ? session.recipientFingerprint : session.senderFingerprint;
+    const verified = isPublicKeyVerified(recipient ? session.recipientTrust : session.senderTrust, fingerprint);
+    card.fingerprint.textContent = fingerprint ? formatFingerprint(fingerprint) : "No key loaded";
+    card.trustStatus.textContent = contactController.statusLabel(card.slot, verified);
+    card.trustStatus.classList.toggle("is-verified", verified);
+    card.verifyCheckbox.checked = verified;
+  }
 }
 
 async function runOperation(message: string, action: () => Promise<void>): Promise<void> {
@@ -478,17 +505,18 @@ async function runOperation(message: string, action: () => Promise<void>): Promi
 function focusVaultControl(): void {
   // Focus after the operation has re-enabled its controls.
   requestAnimationFrame(() => {
-    if (!vaultPassphraseInput.disabled) vaultPassphraseInput.focus();
+    if (!identityNameInput.disabled) identityNameInput.focus();
+    else if (!vaultPassphraseInput.disabled) vaultPassphraseInput.focus();
     else vaultActionButton.focus();
   });
 }
 
-async function copyPublicKey(value: string): Promise<void> {
+async function copyText(value: string, success: string): Promise<void> {
   try {
     await navigator.clipboard.writeText(value);
-    setStatus("Public key copied.");
+    setStatus(success);
   } catch {
-    setStatus("Unable to copy. Select and copy the public key text manually.");
+    setStatus("Unable to copy. Select and copy the text manually.");
   }
 }
 
@@ -508,7 +536,7 @@ function getElement<T extends HTMLElement>(id: string): T {
 
 async function initializeVault(): Promise<void> {
   try {
-    vaultExists = (await loadPrivateKeyVault()) !== undefined;
+    vaultExists = (await loadIdentityVault()) !== undefined;
     storageReady = true;
   } catch (error) {
     setStatus(formatError(error));
@@ -516,5 +544,6 @@ async function initializeVault(): Promise<void> {
   renderControls();
 }
 
+renderTrust();
 void initializeVault();
 void contactController.initialize().catch((error: unknown) => setStatus(formatError(error)));
