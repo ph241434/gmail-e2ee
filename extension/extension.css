@@ -1,0 +1,6 @@
+.popup-body { width: 360px; }
+.popup { padding: 16px; }
+.popup h1 { font-size: 1.25rem; }
+.popup-form { display: grid; gap: 8px; margin-top: 12px; }
+.popup .button-row { margin-top: 14px; }
+.popup .identity-summary { margin-top: 4px; }

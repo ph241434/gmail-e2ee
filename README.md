@@ -18,13 +18,14 @@ Implemented:
 - the contact email must be one of the key's self-signed user IDs
 - replaced contact keys are kept, so mail signed with a previously verified key can still be checked
 - tested round trips with a real GnuPG in both directions
-- 108 automated tests
+- a Chrome extension skeleton: key manager page, toolbar popup for unlock and lock, shared lock state, auto-lock
+- 115 unit tests, plus browser tests that load the built extension into Chromium
 
 Not yet implemented:
-- Gmail integration and browser-extension APIs
+- Gmail integration (the extension does not touch Gmail yet)
 - PGP/MIME (subjects, attachments), key discovery (WKD)
 
-This is an educational end-to-end encryption proof of concept intended to eventually integrate with Gmail. It deliberately stays local: no Gmail integration, Google APIs, OAuth flow, extension APIs, or key server.
+This is an educational end-to-end encryption proof of concept intended to eventually integrate with Gmail. It deliberately stays local: no Google APIs, OAuth flow, or key server.
 
 ```text
 plaintext -> sign (inside) -> encrypt to recipient + self -> armored PGP message -> decrypt -> verify expected signer -> plaintext
@@ -125,6 +126,25 @@ In the demo page, the **Encrypt to** card supplies the main recipient and **Also
 
 To try it by hand, copy your public key with **Copy my public key**, import it with `gpg --import`, and paste any message from **Encrypted message (OpenPGP)** into `gpg --decrypt`.
 
+## Chrome Extension
+
+The `extension/` folder packages the same code as a Manifest V3 Chrome extension. [docs/EXTENSION-DESIGN.md](docs/EXTENSION-DESIGN.md) describes the full design and its trust boundaries. So far it contains:
+
+- **Key manager** (`options.html`): this app, opened automatically when the extension is installed.
+- **Popup** (`popup.html`): shows whether the identity is locked, and unlocks or locks it. Chrome draws the popup itself, so it is the place to type the vault passphrase.
+- **Shared lock state** (`extension/session.ts`): the unlocked identity is kept in `chrome.storage.session`, which Chrome holds in memory only, clears when the browser closes, and hides from content scripts. Locking in one place locks everywhere.
+- **Background worker** (`background.ts`): never handles keys or plaintext. It locks the identity 60 minutes after it was unlocked.
+
+It requests only the `storage` and `alarms` permissions. Its pages allow no inline or remote scripts.
+
+To try it:
+
+```bash
+npm run build:extension
+```
+
+Then open `chrome://extensions`, turn on **Developer mode**, choose **Load unpacked**, and select the `dist-extension` folder.
+
 ## Threat Model
 
 The intended system protects message content from the transport provider. In a Gmail version, plaintext would be encrypted before it enters Gmail and decrypted only on the recipient's device.
@@ -154,6 +174,12 @@ npm test
 npm run dev
 ```
 
+Browser tests need Playwright's Chromium once (`npx playwright install chromium`), then:
+
+```bash
+npm run test:e2e
+```
+
 1. Enter your name, email and a passphrase, then select **Create identity**. On a later visit, enter the passphrase and select **Unlock**.
 2. Select **Sign and encrypt**, then **Decrypt and verify**, to try a round trip to yourself.
 3. To write to someone else, open **Public key text** on the **Encrypt to** card, paste their armored public key, select **Import recipient key**, optionally **Save as contact**, compare the fingerprint with them, and tick the checkbox. To include more people, list the emails of other verified contacts in **Also send to**.
@@ -166,6 +192,14 @@ The old RSA prototype's data (`gmail-e2ee` and `gmail-e2ee-contacts` databases) 
 ## Project Structure
 
 ```text
+extension/
+  manifest.json                 permissions, pages, content security policy
+  background.ts                 auto-lock timer; keeps session storage closed to content scripts
+  session.ts                    unlocked identity shared through chrome.storage.session
+  options.html, options.ts      key manager (this app)
+  popup.html, popup.ts          lock state, unlock, lock
+scripts/build-extension.mjs     builds dist-extension/
+e2e/                            browser tests that load the built extension
 src/
   contacts/
     contact.ts                  contact model, validation, key/email binding
@@ -184,9 +218,11 @@ src/
   ui/
     contactController.ts        contact pickers, editors and history
     keySession.ts               active identity and card bindings
+    sessionBridge.ts            hook for sharing the unlocked identity between pages
   main.ts                       page layout and workflow
 tests/
   contacts.test.ts
+  extensionSession.test.ts
   gpgInterop.test.ts
   identityBackup.test.ts
   identityVault.test.ts
@@ -200,4 +236,4 @@ tests/
 
 - PGP/MIME (RFC 3156) with protected headers, so subjects and attachments are covered.
 - Key discovery through WKD.
-- Browser-extension design that keeps keys out of the Gmail page.
+- Gmail compose and read integration in the extension, as designed in docs/EXTENSION-DESIGN.md.

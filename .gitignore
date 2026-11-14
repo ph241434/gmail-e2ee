@@ -39,3 +39,10 @@ pnpm-debug.log*
 
 # Local Claude Code settings
 .claude/
+
+# Built Chrome extension
+dist-extension/
+
+# Playwright output
+test-results/
+playwright-report/
