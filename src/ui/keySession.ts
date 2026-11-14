@@ -1,7 +1,9 @@
-import type { DemoKeys, DemoPublicKeyFingerprints } from "../demo";
+import type * as openpgp from "openpgp";
+import { releaseIdentity, type UnlockedIdentity } from "../pgp/identityVault";
 import {
   createUnverifiedPublicKeyTrust,
   isPublicKeyVerified,
+  markPublicKeyVerified,
   type SessionPublicKeyTrust
 } from "../trust/publicKeyTrust";
 
@@ -18,18 +20,19 @@ export function getVaultView(vaultExists: boolean, source?: ActiveKeySource) {
   return {
     mode,
     badge: {
-      setup: "No saved vault",
+      setup: "No saved identity",
       locked: "Vault locked",
       unlocked: "Vault unlocked",
-      temporary: "Temporary keys"
+      temporary: "Temporary identity"
     }[mode],
     primaryLabel: {
-      setup: "Create vault",
+      setup: "Create identity",
       locked: "Unlock",
       unlocked: "Lock",
-      temporary: "Clear temporary keys"
+      temporary: "Clear temporary identity"
     }[mode],
     needsPassphrase: mode === "setup" || mode === "locked",
+    needsIdentityDetails: mode === "setup",
     canUseTemporaryKeys: mode !== "temporary",
     canCreateInAdvanced: mode === "temporary" && !vaultExists,
     canReplaceVault: vaultExists,
@@ -37,49 +40,70 @@ export function getVaultView(vaultExists: boolean, source?: ActiveKeySource) {
   };
 }
 
+/**
+ * The active identity plus two bindings: the recipient key to encrypt to and the
+ * sender key whose signature a message must carry. A binding to the identity's own
+ * key is trusted automatically, since that key came out of the user's own vault.
+ */
 export class KeySession {
-  keys: DemoKeys | undefined;
+  identity: UnlockedIdentity | undefined;
   source: ActiveKeySource | undefined;
-  recipientPublicKey: CryptoKey | undefined;
-  senderPublicKey: CryptoKey | undefined;
+  recipientPublicKey: openpgp.PublicKey | undefined;
+  senderPublicKey: openpgp.PublicKey | undefined;
   recipientFingerprint: string | undefined;
   senderFingerprint: string | undefined;
   recipientTrust: SessionPublicKeyTrust | undefined;
   senderTrust: SessionPublicKeyTrust | undefined;
 
-  activate(keys: DemoKeys, source: ActiveKeySource, fingerprints: DemoPublicKeyFingerprints): void {
-    this.keys = keys;
+  activate(identity: UnlockedIdentity, source: ActiveKeySource): void {
+    if (this.identity !== identity) releaseIdentity(this.identity);
+    this.identity = identity;
     this.source = source;
-    this.setRecipientKey(keys.aliceEncryptionKeyPair.publicKey, fingerprints.aliceEncryptionFingerprint);
-    this.setSenderKey(keys.pavelSigningKeyPair.publicKey, fingerprints.pavelVerificationFingerprint);
+    this.setRecipientKey(identity.publicKey.key, identity.publicKey.fingerprint);
+    this.setSenderKey(identity.publicKey.key, identity.publicKey.fingerprint);
   }
 
-  setRecipientKey(key?: CryptoKey, fingerprint?: string): void {
+  get ownFingerprint(): string | undefined {
+    return this.identity?.publicKey.fingerprint;
+  }
+
+  isOwnKey(fingerprint: string | undefined): boolean {
+    return !!fingerprint && fingerprint === this.ownFingerprint;
+  }
+
+  setRecipientKey(key?: openpgp.PublicKey, fingerprint?: string): void {
     this.recipientPublicKey = key;
     this.recipientFingerprint = fingerprint;
-    this.recipientTrust = fingerprint ? createUnverifiedPublicKeyTrust(fingerprint) : undefined;
+    this.recipientTrust = this.initialTrust(fingerprint);
   }
 
-  setSenderKey(key?: CryptoKey, fingerprint?: string): void {
+  setSenderKey(key?: openpgp.PublicKey, fingerprint?: string): void {
     this.senderPublicKey = key;
     this.senderFingerprint = fingerprint;
-    this.senderTrust = fingerprint ? createUnverifiedPublicKeyTrust(fingerprint) : undefined;
+    this.senderTrust = this.initialTrust(fingerprint);
   }
 
   get canEncrypt(): boolean {
-    return !!this.keys && !!this.recipientPublicKey &&
+    return !!this.identity && !!this.recipientPublicKey &&
       isPublicKeyVerified(this.recipientTrust, this.recipientFingerprint);
   }
 
   get canDecrypt(): boolean {
-    return !!this.keys && !!this.senderPublicKey &&
+    return !!this.identity && !!this.senderPublicKey &&
       isPublicKeyVerified(this.senderTrust, this.senderFingerprint);
   }
 
   clear(): void {
-    this.keys = undefined;
+    releaseIdentity(this.identity);
+    this.identity = undefined;
     this.source = undefined;
     this.setRecipientKey();
     this.setSenderKey();
+  }
+
+  private initialTrust(fingerprint: string | undefined): SessionPublicKeyTrust | undefined {
+    if (!fingerprint) return undefined;
+    const trust = createUnverifiedPublicKeyTrust(fingerprint);
+    return this.isOwnKey(fingerprint) ? markPublicKeyVerified(trust) : trust;
   }
 }

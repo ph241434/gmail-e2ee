@@ -10,9 +10,13 @@
     "test": "vitest run"
   },
   "devDependencies": {
+    "@types/node": "22.20.5",
     "fake-indexeddb": "^6.2.5",
     "typescript": "^7.0.2",
     "vite": "^8.3.0",
     "vitest": "^5.0.0"
+  },
+  "dependencies": {
+    "openpgp": "6.3.2"
   }
 }

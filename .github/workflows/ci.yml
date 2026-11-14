@@ -4,9 +4,8 @@ on:
   push:
     branches:
       - main
+  # All pull requests, so stacked feature branches are checked before they reach main.
   pull_request:
-    branches:
-      - main
 
 permissions:
   contents: read

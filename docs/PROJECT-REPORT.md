@@ -2,6 +2,8 @@
 
 Prepared October 14, 2026. This report describes the source on `feature/persistent-contact-trust`.
 
+> **Update, November 9, 2026: OpenPGP prototype.** The branch `feature/openpgp-prototype` replaces the custom RSA message format described below with standard OpenPGP (OpenPGP.js 6.3.2, v4 Ed25519/Cv25519 keys). The identity vault keeps the PBKDF2 + AES-GCM sealing design, and contacts keep the trust, key-change and revision rules, now with one OpenPGP key per contact bound to its email. Messages are signed inside the encryption and always encrypted to the sender too. A test exchanges messages with a real GnuPG in both directions, and the full suite is 75 tests across six files. The README on that branch describes the new design, its settings and its limits. The rest of this report still describes the RSA baseline.
+
 ## Project Position
 
 The project is a working local cryptography and key-management proof of concept for a future Gmail encryption tool. It is not a Gmail extension or a deployed email service yet.

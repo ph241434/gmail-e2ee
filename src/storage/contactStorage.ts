@@ -1,14 +1,15 @@
 import {
+  assertKeyMatchesEmail,
   ContactError,
   normalizeContactDetails,
   normalizeContactKey,
   parseContact,
   validateContactKeyMaterial,
-  type Contact,
-  type ContactKeyRole
+  type Contact
 } from "../contacts/contact";
 
-const DATABASE_NAME = "gmail-e2ee-contacts";
+// Version 2 contacts hold OpenPGP keys; the RSA prototype's "gmail-e2ee-contacts" database is left untouched.
+export const CONTACT_DATABASE_NAME = "gmail-e2ee-openpgp-contacts";
 const STORE_NAME = "contacts";
 
 export class ContactConflictError extends ContactError {
@@ -33,60 +34,67 @@ export class ContactStore {
     return validateContactKeyMaterial(parseContact(record));
   }
 
-  async create(name: string, email: string, role: ContactKeyRole, pem: string): Promise<Contact> {
+  async create(name: string, email: string, armoredKey: string): Promise<Contact> {
     const details = normalizeContactDetails(name, email);
-    const key = await normalizeContactKey(role, pem);
+    const key = await normalizeContactKey(armoredKey);
+    assertKeyMatchesEmail(key, details.email);
     const now = new Date().toISOString();
     const contact: Contact = {
-      version: 1, id: crypto.randomUUID(), ...details, revision: 1,
+      version: 2, id: crypto.randomUUID(), ...details, revision: 1,
       createdAt: now, updatedAt: now,
-      keys: { [role]: {
-        publicKeyPem: key.publicKeyPem, fingerprint: key.fingerprint,
+      key: {
+        publicKeyArmored: key.armoredKey, fingerprint: key.fingerprint,
         status: "unverified", firstSeenAt: now, verifiedAt: null, changes: []
-      } }
+      }
     };
     await this.write(contact.id, null, () => contact);
     return contact;
   }
 
-  async updateKey(id: string, revision: number, role: ContactKeyRole, pem: string): Promise<Contact> {
+  async updateKey(id: string, revision: number, armoredKey: string): Promise<Contact> {
     const contact = await this.current(id, revision);
-    const normalized = await normalizeContactKey(role, pem);
-    const previous = contact.keys[role];
-    // Matching key material preserves the decision, regardless of PEM whitespace.
-    if (previous?.fingerprint === normalized.fingerprint) {
-      await this.write(id, revision, () => ({ ...contact, revision: revision + 1 }));
-      return { ...contact, revision: revision + 1 };
-    }
+    const normalized = await normalizeContactKey(armoredKey);
+    assertKeyMatchesEmail(normalized, contact.email);
+    const previous = contact.key;
     const now = new Date().toISOString();
+    if (previous.fingerprint === normalized.fingerprint) {
+      // Same primary key: keep the decision, but take the new armor so the owner's
+      // added subkeys, user IDs, or revocations are not discarded.
+      const updated: Contact = {
+        ...contact, revision: revision + 1, updatedAt: now,
+        key: { ...previous, publicKeyArmored: normalized.armoredKey }
+      };
+      await this.write(id, revision, () => updated);
+      return updated;
+    }
     const updated: Contact = {
       ...contact, revision: revision + 1, updatedAt: now,
-      keys: { ...contact.keys, [role]: {
-        publicKeyPem: normalized.publicKeyPem, fingerprint: normalized.fingerprint,
-        status: previous ? "changed" : "unverified", firstSeenAt: now, verifiedAt: null,
-        changes: previous ? [...previous.changes, {
+      key: {
+        publicKeyArmored: normalized.armoredKey, fingerprint: normalized.fingerprint,
+        status: "changed", firstSeenAt: now, verifiedAt: null,
+        changes: [...previous.changes, {
           previousFingerprint: previous.fingerprint, fingerprint: normalized.fingerprint,
           changedAt: now, previousVerifiedAt: previous.verifiedAt
-        }] : []
-      } }
+        }]
+      }
     };
     await this.write(id, revision, () => updated);
     return updated;
   }
 
-  async setVerified(id: string, revision: number, role: ContactKeyRole, fingerprint: string, verified: boolean): Promise<Contact> {
+  async setVerified(id: string, revision: number, fingerprint: string, verified: boolean): Promise<Contact> {
     const contact = await this.current(id, revision);
-    const key = contact.keys[role];
-    if (!key || key.fingerprint !== fingerprint) {
+    const key = contact.key;
+    if (key.fingerprint !== fingerprint) {
       throw new ContactError("The contact key changed. Compare its current fingerprint before verification.");
     }
     const now = new Date().toISOString();
     const updated: Contact = {
       ...contact, revision: revision + 1, updatedAt: now,
-      keys: { ...contact.keys, [role]: {
+      key: {
         ...key, status: verified ? "verified" : key.status === "changed" ? "changed" : "unverified",
         verifiedAt: verified ? now : null
-      } }
+      }
     };
     await this.write(id, revision, () => updated);
     return updated;
@@ -95,14 +103,12 @@ export class ContactStore {
   async updateDetails(id: string, revision: number, name: string, email: string): Promise<Contact> {
     const contact = await this.current(id, revision);
     const details = normalizeContactDetails(name, email);
-    const keys = { ...contact.keys };
+    let key = contact.key;
     if (details.email !== contact.email) {
-      for (const role of ["encryption", "verification"] as const) {
-        const key = keys[role];
-        if (key) keys[role] = { ...key, status: "unverified", verifiedAt: null };
-      }
+      assertKeyMatchesEmail(await normalizeContactKey(key.publicKeyArmored), details.email);
+      key = { ...key, status: key.status === "changed" ? "changed" : "unverified", verifiedAt: null };
     }
-    const updated = { ...contact, ...details, keys, updatedAt: new Date().toISOString(), revision: revision + 1 };
+    const updated: Contact = { ...contact, ...details, key, updatedAt: new Date().toISOString(), revision: revision + 1 };
     await this.write(id, revision, () => updated);
     return updated;
   }
@@ -157,7 +163,7 @@ export class ContactStore {
         transaction.onerror = (event) => {
           const error = (event.target as IDBRequest).error ?? transaction.error;
           failure ??= error?.name === "ConstraintError"
-            ? new ContactError("A contact with this email already exists. Select it to add or update its key.")
+            ? new ContactError("Another contact already uses this email or public key. Select that contact instead.")
             : new ContactError("Unable to save the contact.");
         };
         transaction.onabort = () => reject(failure ?? new ContactError("Contact update was interrupted."));
@@ -170,11 +176,13 @@ export class ContactStore {
   private async open(): Promise<IDBDatabase> {
     try {
       return await new Promise<IDBDatabase>((resolve, reject) => {
-        const request = this.factory.open(DATABASE_NAME, 1);
+        const request = this.factory.open(CONTACT_DATABASE_NAME, 1);
         let blocked = false;
         request.onupgradeneeded = () => {
           const store = request.result.createObjectStore(STORE_NAME, { keyPath: "id" });
           store.createIndex("email", "email", { unique: true });
+          // One key belongs to one contact; reusing it under another address is almost certainly a mistake.
+          store.createIndex("fingerprint", "key.fingerprint", { unique: true });
         };
         request.onblocked = () => { blocked = true; reject(new ContactError("Contact storage is blocked by another tab.")); };
         request.onsuccess = () => {

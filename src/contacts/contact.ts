@@ -1,12 +1,5 @@
-import { fingerprintPublicKey, isPublicKeyFingerprint } from "../crypto/publicKeyFingerprint";
-import {
-  exportRecipientEncryptionPublicKey,
-  exportSenderSigningPublicKey,
-  importRecipientEncryptionPublicKey,
-  importSenderSigningPublicKey
-} from "../crypto/publicKeySerialization";
+import { isOpenPgpFingerprint, parsePublicKey, type ParsedPublicKey } from "../pgp/keys";
 
-export type ContactKeyRole = "encryption" | "verification";
 export type ContactTrustStatus = "unverified" | "verified" | "changed";
 
 export interface ContactKeyChange {
@@ -16,8 +9,9 @@ export interface ContactKeyChange {
   previousVerifiedAt: string | null;
 }
 
+/** One OpenPGP public key covers both encryption (subkey) and signature verification (primary). */
 export interface ContactKey {
-  publicKeyPem: string;
+  publicKeyArmored: string;
   fingerprint: string;
   status: ContactTrustStatus;
   firstSeenAt: string;
@@ -26,14 +20,14 @@ export interface ContactKey {
 }
 
 export interface Contact {
-  version: 1;
+  version: 2;
   id: string;
   name: string;
   email: string;
   revision: number;
   createdAt: string;
   updatedAt: string;
-  keys: Partial<Record<ContactKeyRole, ContactKey>>;
+  key: ContactKey;
 }
 
 export class ContactError extends Error {
@@ -43,9 +37,9 @@ export class ContactError extends Error {
   }
 }
 
-export function isVerifiedContactKey(contact: Contact, role: ContactKeyRole, fingerprint: string | undefined): boolean {
-  const key = contact.keys[role];
-  return !!key && key.status === "verified" && key.verifiedAt !== null && key.fingerprint === fingerprint;
+export function isVerifiedContactKey(contact: Contact, fingerprint: string | undefined): boolean {
+  const key = contact.key;
+  return key.status === "verified" && key.verifiedAt !== null && key.fingerprint === fingerprint;
 }
 
 export function normalizeContactDetails(name: string, email: string) {
@@ -60,57 +54,53 @@ export function normalizeContactDetails(name: string, email: string) {
   return { name: normalizedName, email: normalizedEmail };
 }
 
-export async function normalizeContactKey(role: ContactKeyRole, pem: string) {
-  const publicKey = role === "encryption"
-    ? await importRecipientEncryptionPublicKey(pem)
-    : await importSenderSigningPublicKey(pem);
-  const [publicKeyPem, fingerprint] = await Promise.all([
-    role === "encryption"
-      ? exportRecipientEncryptionPublicKey(publicKey)
-      : exportSenderSigningPublicKey(publicKey),
-    fingerprintPublicKey(publicKey)
-  ]);
-  return { publicKey, publicKeyPem, fingerprint };
+export async function normalizeContactKey(armoredKey: string): Promise<ParsedPublicKey> {
+  try {
+    return await parsePublicKey(armoredKey);
+  } catch (error) {
+    throw new ContactError(error instanceof Error ? error.message : "Invalid public key.");
+  }
+}
+
+/**
+ * The contact email must be one of the key's self-signed user IDs, so a key published
+ * for one address cannot silently be saved under another.
+ */
+export function assertKeyMatchesEmail(key: ParsedPublicKey, email: string): void {
+  if (!key.emails.includes(email)) {
+    throw new ContactError(`This key has no user ID for ${email}. Its addresses: ${key.emails.join(", ") || "none"}.`);
+  }
 }
 
 export async function validateContactKeyMaterial(contact: Contact): Promise<Contact> {
-  await Promise.all((Object.keys(contact.keys) as ContactKeyRole[]).map(async (role) => {
-    const stored = contact.keys[role]!;
-    const normalized = await normalizeContactKey(role, stored.publicKeyPem);
-    if (normalized.fingerprint !== stored.fingerprint) {
-      throw new ContactError("Saved contact fingerprint does not match its public key.");
-    }
-  }));
+  const parsed = await normalizeContactKey(contact.key.publicKeyArmored);
+  if (parsed.fingerprint !== contact.key.fingerprint) {
+    throw new ContactError("Saved contact fingerprint does not match its public key.");
+  }
+  assertKeyMatchesEmail(parsed, contact.email);
   return contact;
 }
 
 export function parseContact(candidate: unknown): Contact {
-  if (!isRecord(candidate) || candidate.version !== 1 ||
+  if (!isRecord(candidate) || candidate.version !== 2 ||
       typeof candidate.id !== "string" || !candidate.id || candidate.id.length > 100 ||
       typeof candidate.name !== "string" || typeof candidate.email !== "string" ||
       !Number.isSafeInteger(candidate.revision) || (candidate.revision as number) < 1 ||
-      !isTimestamp(candidate.createdAt) || !isTimestamp(candidate.updatedAt) ||
-      !isRecord(candidate.keys)) {
+      !isTimestamp(candidate.createdAt) || !isTimestamp(candidate.updatedAt)) {
     throw new ContactError("Saved contact data is invalid or unsupported.");
   }
   const details = normalizeContactDetails(candidate.name, candidate.email);
-  if (details.name !== candidate.name || details.email !== candidate.email ||
-      Object.keys(candidate.keys).some((role) => role !== "encryption" && role !== "verification")) {
+  if (details.name !== candidate.name || details.email !== candidate.email) {
     throw new ContactError("Saved contact data is invalid.");
   }
-  const keys: Contact["keys"] = {};
-  for (const role of ["encryption", "verification"] as const) {
-    if (candidate.keys[role] !== undefined) keys[role] = parseKey(candidate.keys[role]);
-  }
-  if (!keys.encryption && !keys.verification) throw new ContactError("Saved contact has no public keys.");
   return {
-    version: 1, id: candidate.id, ...details, revision: candidate.revision as number,
-    createdAt: candidate.createdAt, updatedAt: candidate.updatedAt, keys
+    version: 2, id: candidate.id, ...details, revision: candidate.revision as number,
+    createdAt: candidate.createdAt, updatedAt: candidate.updatedAt, key: parseKey(candidate.key)
   };
 }
 
 function parseKey(candidate: unknown): ContactKey {
-  if (!isRecord(candidate) || typeof candidate.publicKeyPem !== "string" ||
+  if (!isRecord(candidate) || typeof candidate.publicKeyArmored !== "string" ||
       !isFingerprint(candidate.fingerprint) || !isTimestamp(candidate.firstSeenAt) ||
       !["unverified", "verified", "changed"].includes(String(candidate.status)) ||
       !(candidate.verifiedAt === null || isTimestamp(candidate.verifiedAt)) ||
@@ -140,14 +130,14 @@ function parseKey(candidate: unknown): ContactKey {
     throw new ContactError("Changed contact key is missing its history.");
   }
   return {
-    publicKeyPem: candidate.publicKeyPem, fingerprint: candidate.fingerprint,
+    publicKeyArmored: candidate.publicKeyArmored, fingerprint: candidate.fingerprint,
     status: candidate.status as ContactTrustStatus, firstSeenAt: candidate.firstSeenAt,
     verifiedAt: candidate.verifiedAt as string | null, changes
   };
 }
 
 function isFingerprint(value: unknown): value is string {
-  return typeof value === "string" && isPublicKeyFingerprint(value);
+  return typeof value === "string" && isOpenPgpFingerprint(value);
 }
 
 function isTimestamp(value: unknown): value is string {

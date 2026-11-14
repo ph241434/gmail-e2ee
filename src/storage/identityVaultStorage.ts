@@ -1,19 +1,20 @@
-import type { PrivateKeyVault } from "../crypto/privateKeyVault";
+import type { IdentityVault } from "../pgp/identityVault";
 
-const DATABASE_NAME = "gmail-e2ee";
+// Separate from the RSA prototype's "gmail-e2ee" database so switching branches never mixes formats.
+const DATABASE_NAME = "gmail-e2ee-openpgp";
 const DATABASE_VERSION = 1;
-const VAULT_STORE_NAME = "private-key-vault";
+const VAULT_STORE_NAME = "identity-vault";
 const DEFAULT_VAULT_KEY = "default";
 
-export class PrivateKeyVaultStorageError extends Error {
+export class IdentityVaultStorageError extends Error {
   constructor(message: string) {
     super(message);
-    this.name = "PrivateKeyVaultStorageError";
+    this.name = "IdentityVaultStorageError";
   }
 }
 
-export async function savePrivateKeyVault(
-  vault: PrivateKeyVault,
+export async function saveIdentityVault(
+  vault: IdentityVault,
   indexedDb: IDBFactory = indexedDB
 ): Promise<void> {
   const database = await openDatabase(indexedDb);
@@ -24,13 +25,13 @@ export async function savePrivateKeyVault(
     transaction.objectStore(VAULT_STORE_NAME).put(vault, DEFAULT_VAULT_KEY);
     await completed;
   } catch {
-    throw new PrivateKeyVaultStorageError("Unable to save the private-key vault.");
+    throw new IdentityVaultStorageError("Unable to save the identity vault.");
   } finally {
     database.close();
   }
 }
 
-export async function loadPrivateKeyVault(
+export async function loadIdentityVault(
   indexedDb: IDBFactory = indexedDB
 ): Promise<unknown | undefined> {
   const database = await openDatabase(indexedDb);
@@ -43,13 +44,13 @@ export async function loadPrivateKeyVault(
     await completed;
     return vault;
   } catch {
-    throw new PrivateKeyVaultStorageError("Unable to load the private-key vault.");
+    throw new IdentityVaultStorageError("Unable to load the identity vault.");
   } finally {
     database.close();
   }
 }
 
-export async function deletePrivateKeyVault(
+export async function deleteIdentityVault(
   indexedDb: IDBFactory = indexedDB
 ): Promise<void> {
   const database = await openDatabase(indexedDb);
@@ -60,7 +61,7 @@ export async function deletePrivateKeyVault(
     transaction.objectStore(VAULT_STORE_NAME).delete(DEFAULT_VAULT_KEY);
     await completed;
   } catch {
-    throw new PrivateKeyVaultStorageError("Unable to delete the private-key vault.");
+    throw new IdentityVaultStorageError("Unable to delete the identity vault.");
   } finally {
     database.close();
   }
@@ -82,7 +83,7 @@ async function openDatabase(indexedDb: IDBFactory): Promise<IDBDatabase> {
       request.onblocked = () => reject(new Error("IndexedDB upgrade was blocked."));
     });
   } catch {
-    throw new PrivateKeyVaultStorageError("Unable to open local private-key storage.");
+    throw new IdentityVaultStorageError("Unable to open local identity storage.");
   }
 }
 
