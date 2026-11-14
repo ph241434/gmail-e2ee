@@ -114,3 +114,7 @@ dialog p { color: #52606a; font-size: 0.9rem; }
 #identity-fields[hidden] { display: none; }
 .spaced-label { margin-top: 12px; }
 #extra-recipients { width: 100%; }
+.import-key-form { margin-top: 14px; }
+.import-key-form .public-key-input { min-height: 110px; }
+.import-key-form .vault-controls { margin-top: 10px; }
+input[type="file"] { max-width: 100%; font-size: 0.84rem; }

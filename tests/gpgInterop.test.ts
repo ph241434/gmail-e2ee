@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type * as openpgp from "openpgp";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
+import { exportPrivateKey, importPrivateKey } from "../src/pgp/identityBackup";
+import { createTemporaryIdentity } from "../src/pgp/identityVault";
 import { generateIdentityKey, parsePublicKey, type ParsedPublicKey } from "../src/pgp/keys";
 import { decryptMessage, encryptMessage } from "../src/pgp/message";
 
@@ -66,6 +68,24 @@ describe.skipIf(!hasGpg)("GnuPG interoperability", () => {
     const result = await decryptMessage(armored, pavel, [bob.key]);
     expect(result.text.trim()).toBe("Hello Pavel, from GnuPG.");
     expect(result.signerFingerprint).toBe(bob.fingerprint);
+  }, 60_000);
+
+  test("GnuPG imports our exported private key and reads mail with it", async () => {
+    const carol = await createTemporaryIdentity({ name: "Carol", email: "carol@example.test" });
+    const exported = await exportPrivateKey(carol, "export passphrase for gpg");
+    gpg(["--pinentry-mode", "loopback", "--passphrase", "export passphrase for gpg", "--import"], exported);
+    const armored = await encryptMessage("For Carol's other device.", [carol.publicKey.key], pavel);
+    const result = gpg(["--pinentry-mode", "loopback", "--passphrase", "export passphrase for gpg", "--decrypt"], armored);
+    expect(result.stdout).toContain("For Carol's other device.");
+  }, 60_000);
+
+  test("we import a private key exported by GnuPG", async () => {
+    const exported = gpg(["--armor", "--export-secret-keys", "bob@example.test"]).stdout;
+    const { identity } = await importPrivateKey(exported, "", "vault passphrase for bob");
+    expect(identity.publicKey.fingerprint).toBe(bob.fingerprint);
+    const armored = await encryptMessage("To Bob's imported key.", [bob.key], pavel);
+    await expect(decryptMessage(armored, identity.privateKey, [pavel.toPublic()]))
+      .resolves.toMatchObject({ text: "To Bob's imported key." });
   }, 60_000);
 
   test("a GnuPG message signed by someone else is refused", async () => {

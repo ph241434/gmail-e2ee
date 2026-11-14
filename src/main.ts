@@ -7,10 +7,12 @@ import {
   unlockIdentityVault,
   getDecryptionKeys,
   rotateIdentityVault,
+  type IdentityVault,
   type UnlockedIdentity
 } from "./pgp/identityVault";
 import { describeRecipientProblem, parseAddressList, resolveRecipients } from "./contacts/recipients";
 import { describeSigner, ownSigners } from "./contacts/signers";
+import { createIdentityBackup, exportPrivateKey, importPrivateKey, restoreIdentityBackup } from "./pgp/identityBackup";
 import { formatFingerprint } from "./pgp/keys";
 import { decryptMessage, encryptMessage, getKeyIds, getMessageRecipientKeyIds } from "./pgp/message";
 import { deleteIdentityVault, loadIdentityVault, saveIdentityVault } from "./storage/identityVaultStorage";
@@ -116,6 +118,46 @@ app.innerHTML = `
           <button id="replace-vault" type="submit">Replace vault</button>
         </form>
       </details>
+      <details id="backup-options" class="advanced-options">
+        <summary>Backup and import</summary>
+        <div class="advanced-actions">
+          <button id="download-backup" class="secondary-button" type="button" hidden>Download backup</button>
+        </div>
+        <form id="restore-backup-form" class="vault-controls">
+          <div class="passphrase-field">
+            <label for="restore-file">Backup file to restore</label>
+            <input id="restore-file" type="file" accept=".json,application/json" required>
+          </div>
+          <div class="passphrase-field">
+            <label for="restore-passphrase">Vault passphrase of that backup</label>
+            <input id="restore-passphrase" ${passphraseAttributes.replace("new-password", "current-password")}>
+          </div>
+          <button id="restore-backup" class="secondary-button" type="submit">Restore backup</button>
+        </form>
+        <form id="export-key-form" class="vault-controls" hidden>
+          <div class="passphrase-field">
+            <label for="export-passphrase">New passphrase for the exported key</label>
+            <input id="export-passphrase" ${passphraseAttributes}>
+          </div>
+          <button id="export-key" class="secondary-button" type="submit">Export private key</button>
+        </form>
+        <form id="import-key-form" class="import-key-form">
+          <label for="import-key-text">Existing OpenPGP private key to import</label>
+          <textarea id="import-key-text" class="public-key-input" spellcheck="false" autocomplete="off" required
+            placeholder="-----BEGIN PGP PRIVATE KEY BLOCK-----"></textarea>
+          <div class="vault-controls">
+            <div class="passphrase-field">
+              <label for="import-key-passphrase">Passphrase of that key, if it has one</label>
+              <input id="import-key-passphrase" type="password" maxlength="1024" autocomplete="off" autocapitalize="none" spellcheck="false">
+            </div>
+            <div class="passphrase-field">
+              <label for="import-vault-passphrase">New vault passphrase</label>
+              <input id="import-vault-passphrase" ${passphraseAttributes}>
+            </div>
+            <button id="import-key" class="secondary-button" type="submit">Import key</button>
+          </div>
+        </form>
+      </details>
     </section>
 
     <section class="public-key-section" aria-labelledby="public-key-heading">
@@ -182,6 +224,21 @@ const rotateKeyForm = getElement<HTMLFormElement>("rotate-key-form");
 const rotateKeyButton = getElement<HTMLButtonElement>("rotate-key");
 const rotatePassphraseInput = getElement<HTMLInputElement>("rotate-passphrase");
 const extraRecipientsInput = getElement<HTMLInputElement>("extra-recipients");
+const downloadBackupButton = getElement<HTMLButtonElement>("download-backup");
+const restoreBackupForm = getElement<HTMLFormElement>("restore-backup-form");
+const restoreFileInput = getElement<HTMLInputElement>("restore-file");
+const restorePassphraseInput = getElement<HTMLInputElement>("restore-passphrase");
+const exportKeyForm = getElement<HTMLFormElement>("export-key-form");
+const exportPassphraseInput = getElement<HTMLInputElement>("export-passphrase");
+const importKeyForm = getElement<HTMLFormElement>("import-key-form");
+const importKeyTextInput = getElement<HTMLTextAreaElement>("import-key-text");
+const importKeyPassphraseInput = getElement<HTMLInputElement>("import-key-passphrase");
+const importVaultPassphraseInput = getElement<HTMLInputElement>("import-vault-passphrase");
+const backupControls = [
+  downloadBackupButton, restoreFileInput, restorePassphraseInput, getElement<HTMLButtonElement>("restore-backup"),
+  exportPassphraseInput, getElement<HTMLButtonElement>("export-key"),
+  importKeyTextInput, importKeyPassphraseInput, importVaultPassphraseInput, getElement<HTMLButtonElement>("import-key")
+];
 const replaceVaultForm = getElement<HTMLFormElement>("replace-vault-form");
 const replaceVaultButton = getElement<HTMLButtonElement>("replace-vault");
 const replaceNameInput = getElement<HTMLInputElement>("replace-name");
@@ -255,6 +312,60 @@ replaceVaultForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   if (isBusy || !storageReady) return;
   await createAndSaveVault(replaceNameInput, replaceEmailInput, newVaultPassphraseInput);
+});
+
+downloadBackupButton.addEventListener("click", async () => {
+  await runOperation("Preparing backup...", async () => {
+    const vault = await loadIdentityVault();
+    if (vault === undefined) throw new Error("No saved identity was found in this browser.");
+    const backup = createIdentityBackup(vault as IdentityVault);
+    downloadText(`gmail-e2ee-backup-${(vault as IdentityVault).fingerprint.slice(-8)}.json`, backup, "application/json");
+    setStatus("Backup downloaded. It opens only with your vault passphrase, so keep both.");
+  });
+});
+
+restoreBackupForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const file = restoreFileInput.files?.[0];
+  if (isBusy || !storageReady || !file) return;
+  if (vaultExists && !await confirmVaultAction("replace")) return;
+  await runOperation("Restoring backup...", async () => {
+    // The backup must open with its passphrase before it may replace anything.
+    const restored = await restoreIdentityBackup(await file.text(), restorePassphraseInput.value);
+    await saveIdentityVault(restored.vault);
+    vaultExists = true;
+    activateIdentity(restored.identity, "vault");
+    restoreFileInput.value = "";
+    setStatus("Backup restored and unlocked.");
+    focusVaultControl();
+  });
+});
+
+exportKeyForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (isBusy || !session.identity) return;
+  const identity = session.identity;
+  await runOperation("Exporting private key...", async () => {
+    const armored = await exportPrivateKey(identity, exportPassphraseInput.value);
+    downloadText(`${identity.publicKey.primaryUser.email}-private-key.asc`, armored, "application/pgp-keys");
+    setStatus("Private key exported. Other OpenPGP apps can import it with the passphrase you just set.");
+  });
+});
+
+importKeyForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (isBusy || !storageReady) return;
+  if (vaultExists && !await confirmVaultAction("replace")) return;
+  await runOperation("Importing private key...", async () => {
+    const imported = await importPrivateKey(
+      importKeyTextInput.value, importKeyPassphraseInput.value, importVaultPassphraseInput.value
+    );
+    await saveIdentityVault(imported.vault);
+    vaultExists = true;
+    activateIdentity(imported.identity, "vault");
+    setStatus("Key imported, sealed in a new vault, and unlocked.");
+    focusVaultControl();
+  });
 });
 
 generateKeysButton.addEventListener("click", async () => {
@@ -432,10 +543,7 @@ function confirmAction(title: string, message: string, label = "Delete contact")
   confirmationDialog.returnValue = "cancel";
   return new Promise((resolve) => {
     confirmationDialog.addEventListener("close", () => {
-      if (confirmationDialog.returnValue !== "confirm") {
-        newVaultPassphraseInput.value = "";
-        rotatePassphraseInput.value = "";
-      }
+      if (confirmationDialog.returnValue !== "confirm") clearSecretInputs();
       resolve(confirmationDialog.returnValue === "confirm");
     }, { once: true });
     confirmationDialog.showModal();
@@ -461,9 +569,7 @@ function clearActiveKeys(): void {
   messageRecipients.textContent = "No message";
   decryptedMessageOutput.textContent = "Nothing decrypted yet";
   for (const card of cards) card.keyInput.value = "";
-  vaultPassphraseInput.value = "";
-  newVaultPassphraseInput.value = "";
-  rotatePassphraseInput.value = "";
+  clearSecretInputs();
   document.querySelectorAll<HTMLDetailsElement>("details").forEach((details) => { details.open = false; });
   renderTrust();
   renderControls();
@@ -515,6 +621,9 @@ function renderControls(): void {
   generateKeysButton.disabled = isBusy;
   deleteVaultButton.hidden = !view.canDeleteVault;
   deleteVaultButton.disabled = isBusy || !storageReady;
+  downloadBackupButton.hidden = !vaultExists;
+  exportKeyForm.hidden = !session.identity;
+  for (const control of backupControls) control.disabled = isBusy || !storageReady;
   rotateKeyForm.hidden = !view.canRotateKey;
   rotateKeyButton.disabled = isBusy || !storageReady;
   rotatePassphraseInput.disabled = isBusy || rotateKeyForm.hidden || !storageReady;
@@ -563,12 +672,27 @@ async function runOperation(message: string, action: () => Promise<void>): Promi
   } catch (error) {
     setStatus(formatError(error));
   } finally {
-    vaultPassphraseInput.value = "";
-    newVaultPassphraseInput.value = "";
-    rotatePassphraseInput.value = "";
+    clearSecretInputs();
     isBusy = false;
     renderControls();
   }
+}
+
+/** Clears every passphrase field and any pasted private key. */
+function clearSecretInputs(): void {
+  document.querySelectorAll<HTMLInputElement>('input[type="password"]').forEach((input) => { input.value = ""; });
+  importKeyTextInput.value = "";
+}
+
+function downloadText(filename: string, text: string, type: string): void {
+  const url = URL.createObjectURL(new Blob([text], { type }));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
 }
 
 function focusVaultControl(): void {
