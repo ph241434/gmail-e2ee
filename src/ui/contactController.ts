@@ -1,5 +1,7 @@
 import type * as openpgp from "openpgp";
 import { isVerifiedContactKey, normalizeContactKey, type Contact } from "../contacts/contact";
+import type { ContactLookup } from "../contacts/recipients";
+import { contactSigners, type TrustedSigner } from "../contacts/signers";
 import { formatFingerprint } from "../pgp/keys";
 import { ContactStore } from "../storage/contactStorage";
 import { markPublicKeyUnverified, markPublicKeyVerified } from "../trust/publicKeyTrust";
@@ -65,6 +67,21 @@ export class ContactController {
 
   isOwnKey(slot: BindingSlot): boolean {
     return this.session.isOwnKey(this.fingerprint(slot));
+  }
+
+  /** Saved contacts, for resolving extra recipients by email. */
+  get lookup(): ContactLookup {
+    return this.store;
+  }
+
+  /**
+   * The saved contact bound to a card, including keys verified before they were replaced.
+   * Undefined when the card holds an unsaved key or the user's own key.
+   */
+  async savedSigners(slot: BindingSlot): Promise<TrustedSigner[] | undefined> {
+    const contact = this.views[slot].contact;
+    if (!contact || this.isOwnKey(slot)) return undefined;
+    return contactSigners(await this.store.get(contact.id));
   }
 
   statusLabel(slot: BindingSlot, verified: boolean): string {

@@ -35,6 +35,8 @@ export function getVaultView(vaultExists: boolean, source?: ActiveKeySource) {
     needsIdentityDetails: mode === "setup",
     canUseTemporaryKeys: mode !== "temporary",
     canCreateInAdvanced: mode === "temporary" && !vaultExists,
+    // Rotation re-seals the saved vault, so it is offered only while that vault is the active identity.
+    canRotateKey: mode === "unlocked",
     canReplaceVault: vaultExists,
     canDeleteVault: vaultExists
   };

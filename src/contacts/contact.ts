@@ -1,9 +1,19 @@
-import { isOpenPgpFingerprint, parsePublicKey, type ParsedPublicKey } from "../pgp/keys";
+import {
+  isOpenPgpFingerprint,
+  parsePublicKey,
+  parseRetiredPublicKey,
+  type ParsedPublicKey
+} from "../pgp/keys";
 
 export type ContactTrustStatus = "unverified" | "verified" | "changed";
 
+/** History is capped so a contact record cannot grow without bound. */
+export const CONTACT_MAX_KEY_CHANGES = 20;
+
 export interface ContactKeyChange {
   previousFingerprint: string;
+  /** The replaced public key, kept so mail it signed can still be checked. */
+  previousPublicKeyArmored: string;
   fingerprint: string;
   changedAt: string;
   previousVerifiedAt: string | null;
@@ -42,9 +52,21 @@ export function isVerifiedContactKey(contact: Contact, fingerprint: string | und
   return key.status === "verified" && key.verifiedAt !== null && key.fingerprint === fingerprint;
 }
 
+/**
+ * Previous keys that the user had verified before they were replaced, newest first.
+ * Only these may vouch for older mail; a replaced key that was never verified proves nothing.
+ */
+export function getPreviouslyVerifiedKeys(contact: Contact): ContactKeyChange[] {
+  return contact.key.changes.filter((change) => change.previousVerifiedAt !== null).reverse();
+}
+
+export function normalizeEmail(email: string): string {
+  return email.trim().toLowerCase();
+}
+
 export function normalizeContactDetails(name: string, email: string) {
   const normalizedName = name.trim();
-  const normalizedEmail = email.trim().toLowerCase();
+  const normalizedEmail = normalizeEmail(email);
   if (!normalizedName || normalizedName.length > 80 || /[\x00-\x1f\x7f]/.test(normalizedName)) {
     throw new ContactError("Contact name must contain 1 to 80 characters without control characters.");
   }
@@ -78,6 +100,17 @@ export async function validateContactKeyMaterial(contact: Contact): Promise<Cont
     throw new ContactError("Saved contact fingerprint does not match its public key.");
   }
   assertKeyMatchesEmail(parsed, contact.email);
+  for (const change of contact.key.changes) {
+    let previous: Awaited<ReturnType<typeof parseRetiredPublicKey>>;
+    try {
+      previous = await parseRetiredPublicKey(change.previousPublicKeyArmored);
+    } catch {
+      throw new ContactError("Saved contact key history contains an unreadable previous key.");
+    }
+    if (previous.fingerprint !== change.previousFingerprint) {
+      throw new ContactError("Saved contact key history does not match its previous public key.");
+    }
+  }
   return contact;
 }
 
@@ -105,17 +138,20 @@ function parseKey(candidate: unknown): ContactKey {
       !["unverified", "verified", "changed"].includes(String(candidate.status)) ||
       !(candidate.verifiedAt === null || isTimestamp(candidate.verifiedAt)) ||
       (candidate.status === "verified") !== (candidate.verifiedAt !== null) ||
-      !Array.isArray(candidate.changes)) {
+      !Array.isArray(candidate.changes) || candidate.changes.length > CONTACT_MAX_KEY_CHANGES) {
     throw new ContactError("Saved contact key data is invalid.");
   }
   const changes = candidate.changes.map((change: unknown): ContactKeyChange => {
     if (!isRecord(change) || !isFingerprint(change.previousFingerprint) ||
+        typeof change.previousPublicKeyArmored !== "string" ||
         !isFingerprint(change.fingerprint) || !isTimestamp(change.changedAt) ||
         !(change.previousVerifiedAt === null || isTimestamp(change.previousVerifiedAt))) {
       throw new ContactError("Saved contact key history is invalid.");
     }
     return {
-      previousFingerprint: change.previousFingerprint, fingerprint: change.fingerprint,
+      previousFingerprint: change.previousFingerprint,
+      previousPublicKeyArmored: change.previousPublicKeyArmored,
+      fingerprint: change.fingerprint,
       changedAt: change.changedAt, previousVerifiedAt: change.previousVerifiedAt
     };
   });

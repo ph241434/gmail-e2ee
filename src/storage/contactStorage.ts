@@ -1,7 +1,9 @@
 import {
   assertKeyMatchesEmail,
+  CONTACT_MAX_KEY_CHANGES,
   ContactError,
   normalizeContactDetails,
+  normalizeEmail,
   normalizeContactKey,
   parseContact,
   validateContactKeyMaterial,
@@ -32,6 +34,12 @@ export class ContactStore {
     const record = await this.read((store) => store.get(id));
     if (record === undefined) throw new ContactError("This contact no longer exists. Select another contact.");
     return validateContactKeyMaterial(parseContact(record));
+  }
+
+  /** Looks a contact up by address. Returns undefined when nobody is saved under it. */
+  async findByEmail(email: string): Promise<Contact | undefined> {
+    const record = await this.read((store) => store.index("email").get(normalizeEmail(email)));
+    return record === undefined ? undefined : validateContactKeyMaterial(parseContact(record));
   }
 
   async create(name: string, email: string, armoredKey: string): Promise<Contact> {
@@ -72,10 +80,11 @@ export class ContactStore {
       key: {
         publicKeyArmored: normalized.armoredKey, fingerprint: normalized.fingerprint,
         status: "changed", firstSeenAt: now, verifiedAt: null,
+        // Keep the replaced key itself, so mail it signed can still be checked later.
         changes: [...previous.changes, {
-          previousFingerprint: previous.fingerprint, fingerprint: normalized.fingerprint,
-          changedAt: now, previousVerifiedAt: previous.verifiedAt
-        }]
+          previousFingerprint: previous.fingerprint, previousPublicKeyArmored: previous.publicKeyArmored,
+          fingerprint: normalized.fingerprint, changedAt: now, previousVerifiedAt: previous.verifiedAt
+        }].slice(-CONTACT_MAX_KEY_CHANGES)
       }
     };
     await this.write(id, revision, () => updated);

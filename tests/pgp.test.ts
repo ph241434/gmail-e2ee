@@ -61,6 +61,15 @@ describe("OpenPGP identity keys", () => {
     await expect(parsePublicKey(revoked)).rejects.toThrow("revoked");
   });
 
+  test("ignores a user ID that someone else appended without the owner's signature", async () => {
+    const packets = alice.toPublic().toPacketList();
+    packets.push(openpgp.UserIDPacket.fromObject({ name: "Eve", email: "eve@example.test" }));
+    const forged = new openpgp.PublicKey(packets);
+    expect(forged.getUserIDs()).toContain("Eve <eve@example.test>");
+    const parsed = await parsePublicKey(forged.armor());
+    expect(parsed.emails).toEqual(["alice@example.test"]);
+  });
+
   test("formats fingerprints in the familiar grouped style", () => {
     expect(formatFingerprint("0123456789ABCDEF0123456789ABCDEF01234567"))
       .toBe("0123 4567 89AB CDEF 0123  4567 89AB CDEF 0123 4567");

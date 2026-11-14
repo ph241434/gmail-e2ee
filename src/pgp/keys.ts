@@ -80,9 +80,13 @@ export async function describePublicKey(key: openpgp.PublicKey): Promise<ParsedP
     throw new OpenPgpKeyError("This public key must have valid encryption and signing keys.");
   }
   const primary = await publicKey.getPrimaryUser(undefined, undefined, fullConfig());
-  const emails = publicKey.users
-    .map((user) => user.userID?.email?.trim().toLowerCase())
-    .filter((email): email is string => !!email);
+  // Anyone can append a user ID packet to someone else's key, so count only addresses
+  // carrying a valid, unrevoked self-signature from the key owner.
+  const emails: string[] = [];
+  for (const user of publicKey.users) {
+    const email = user.userID?.email?.trim().toLowerCase();
+    if (email && await hasValidSelfSignature(user)) emails.push(email);
+  }
   return {
     key: publicKey,
     armoredKey: publicKey.armor(fullConfig()),
@@ -93,6 +97,31 @@ export async function describePublicKey(key: openpgp.PublicKey): Promise<ParsedP
       email: primary.user.userID?.email?.toLowerCase() ?? ""
     }
   };
+}
+
+/**
+ * Parses a key that was replaced earlier. It may since have expired or been revoked,
+ * so only its structure and fingerprint are checked, never its current validity.
+ */
+export async function parseRetiredPublicKey(armoredKey: string): Promise<{ key: openpgp.PublicKey; fingerprint: string }> {
+  let key: openpgp.Key;
+  try {
+    key = await openpgp.readKey({ armoredKey: armoredKey.trim(), config: OPENPGP_CONFIG });
+  } catch {
+    throw new OpenPgpKeyError("A saved previous public key is not valid OpenPGP data.");
+  }
+  if (key.isPrivate()) throw new OpenPgpKeyError("A saved previous key contains private key material.");
+  return { key, fingerprint: normalizeFingerprint(key.getFingerprint()) };
+}
+
+async function hasValidSelfSignature(user: openpgp.User): Promise<boolean> {
+  try {
+    // Present at runtime (throws unless a valid self-certification exists) but missing from the typings.
+    await (user as unknown as { verify(date: Date, config: openpgp.Config): Promise<true> }).verify(new Date(), fullConfig());
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function normalizeIdentityDetails(details: IdentityDetails): IdentityDetails {

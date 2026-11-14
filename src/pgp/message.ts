@@ -48,11 +48,12 @@ export async function encryptMessage(
 
 /**
  * Decrypts and requires a valid signature from one of `expectedSigners`.
- * Plaintext is never returned unless the signature verified.
+ * Plaintext is never returned unless the signature verified. `recipient` may list
+ * several keys (the current key and retired ones); whichever the message names is used.
  */
 export async function decryptMessage(
   armoredMessage: string,
-  recipient: openpgp.PrivateKey,
+  recipient: openpgp.PrivateKey | openpgp.PrivateKey[],
   expectedSigners: openpgp.PublicKey[]
 ): Promise<DecryptedMessage> {
   const message = await readArmoredMessage(armoredMessage);
