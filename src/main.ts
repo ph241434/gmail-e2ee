@@ -5,8 +5,12 @@ import {
   IDENTITY_VAULT_MAX_PASSPHRASE_LENGTH,
   IDENTITY_VAULT_MIN_PASSPHRASE_LENGTH,
   unlockIdentityVault,
+  getDecryptionKeys,
+  rotateIdentityVault,
   type UnlockedIdentity
 } from "./pgp/identityVault";
+import { describeRecipientProblem, parseAddressList, resolveRecipients } from "./contacts/recipients";
+import { describeSigner, ownSigners } from "./contacts/signers";
 import { formatFingerprint } from "./pgp/keys";
 import { decryptMessage, encryptMessage, getKeyIds, getMessageRecipientKeyIds } from "./pgp/message";
 import { deleteIdentityVault, loadIdentityVault, saveIdentityVault } from "./storage/identityVaultStorage";
@@ -20,6 +24,8 @@ const session = new KeySession();
 let vaultExists = false;
 let storageReady = false;
 let isBusy = false;
+/** Key IDs of the extra recipients of the last message encrypted here, for labelling. */
+let extraRecipientLabels = new Map<string, string>();
 
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("App root was not found.");
@@ -94,6 +100,13 @@ app.innerHTML = `
           <button id="generate-keys" class="secondary-button" type="button">Use a temporary identity</button>
           <button id="delete-vault" class="danger-button" type="button" hidden>Delete vault</button>
         </div>
+        <form id="rotate-key-form" class="vault-controls" hidden>
+          <div class="passphrase-field">
+            <label for="rotate-passphrase">Vault passphrase, to rotate your key</label>
+            <input id="rotate-passphrase" ${passphraseAttributes.replace("new-password", "current-password")}>
+          </div>
+          <button id="rotate-key" class="secondary-button" type="submit">Rotate key</button>
+        </form>
         <form id="replace-vault-form" class="vault-controls" hidden>
           ${identityFields("replace")}
           <div class="passphrase-field">
@@ -119,6 +132,8 @@ app.innerHTML = `
         <div class="message-column">
           <label for="plaintext">Message to send</label>
           <textarea id="plaintext" spellcheck="true">Meet me at 4 PM.</textarea>
+          <label for="extra-recipients" class="spaced-label">Also send to (emails of verified contacts)</label>
+          <input id="extra-recipients" type="text" spellcheck="false" autocomplete="off" placeholder="alice@example.com, bob@example.com">
           <button id="encrypt" type="button" disabled>Sign and encrypt</button>
         </div>
         <div class="message-column">
@@ -163,6 +178,10 @@ const identityUserId = getElement<HTMLSpanElement>("identity-user-id");
 const identityFingerprint = getElement<HTMLElement>("identity-fingerprint");
 const copyIdentityKeyButton = getElement<HTMLButtonElement>("copy-identity-key");
 const advancedOptions = getElement<HTMLDetailsElement>("advanced-key-options");
+const rotateKeyForm = getElement<HTMLFormElement>("rotate-key-form");
+const rotateKeyButton = getElement<HTMLButtonElement>("rotate-key");
+const rotatePassphraseInput = getElement<HTMLInputElement>("rotate-passphrase");
+const extraRecipientsInput = getElement<HTMLInputElement>("extra-recipients");
 const replaceVaultForm = getElement<HTMLFormElement>("replace-vault-form");
 const replaceVaultButton = getElement<HTMLButtonElement>("replace-vault");
 const replaceNameInput = getElement<HTMLInputElement>("replace-name");
@@ -266,12 +285,41 @@ encryptButton.addEventListener("click", async () => {
     if (!session.canEncrypt || !session.identity || !session.recipientPublicKey) {
       throw new Error("Verify the current recipient key before encryption.");
     }
-    encryptedPackageInput.value = await encryptMessage(plaintextInput.value, [session.recipientPublicKey], session.identity.privateKey);
+    // Extra recipients are looked up by address and must all be verified saved contacts.
+    // If any is not, nothing is encrypted: leaving someone out silently would be worse.
+    const extras = await resolveRecipients(
+      contactController.lookup, parseAddressList(extraRecipientsInput.value), session.identity.publicKey
+    );
+    if (extras.problems.length) {
+      throw new Error(`Cannot encrypt. ${extras.problems.map(describeRecipientProblem).join(" ")}`);
+    }
+    const recipients = [session.recipientPublicKey, ...extras.ready.map((recipient) => recipient.key)];
+    extraRecipientLabels = new Map(extras.ready.flatMap((recipient) =>
+      getKeyIds(recipient.key).map((id): [string, string] => [id, recipient.email])));
+    encryptedPackageInput.value = await encryptMessage(plaintextInput.value, recipients, session.identity.privateKey);
     decryptedMessageOutput.textContent = "Nothing decrypted yet";
-    await renderMessageRecipients();
-    setStatus(contactController.isOwnKey("recipient")
+    const count = await renderMessageRecipients();
+    setStatus(count <= 1
       ? "Signed and encrypted to yourself."
-      : "Signed and encrypted to the recipient and to yourself.");
+      : `Signed and encrypted to ${count - 1} recipient${count === 2 ? "" : "s"} and to yourself.`);
+  });
+});
+
+rotateKeyForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (isBusy || !storageReady || session.source !== "vault") return;
+  if (!await confirmAction("Rotate key?",
+    "A new key replaces your current one. Your old key is kept so earlier mail stays readable, but contacts must get and verify your new public key.",
+    "Rotate key")) return;
+  await runOperation("Rotating key...", async () => {
+    const vault = await loadIdentityVault();
+    if (vault === undefined) throw new Error("No saved identity was found in this browser.");
+    const rotated = await rotateIdentityVault(vault, rotatePassphraseInput.value);
+    await saveIdentityVault(rotated.vault);
+    activateIdentity(rotated.identity, "vault");
+    advancedOptions.open = false;
+    setStatus("Key rotated. Share your new public key; your old key still opens earlier mail.");
+    focusVaultControl();
   });
 });
 
@@ -283,9 +331,16 @@ decryptButton.addEventListener("click", async () => {
       if (!session.canDecrypt || !session.identity || !session.senderPublicKey) {
         throw new Error("Verify the current sender key before decryption.");
       }
-      const result = await decryptMessage(encryptedPackageInput.value, session.identity.privateKey, [session.senderPublicKey]);
+      // Your own retired keys, and a contact's keys verified before they were replaced,
+      // still vouch for older mail.
+      const savedSigners = contactController.isOwnKey("sender")
+        ? ownSigners(session.identity)
+        : await contactController.savedSigners("sender");
+      const signerKeys = savedSigners?.map((signer) => signer.key) ?? [session.senderPublicKey];
+      const result = await decryptMessage(encryptedPackageInput.value, getDecryptionKeys(session.identity), signerKeys);
+      const signer = savedSigners?.find((candidate) => candidate.fingerprint === result.signerFingerprint);
       decryptedMessageOutput.textContent = result.text || "(empty message)";
-      setStatus(`Signature verified (${formatFingerprint(result.signerFingerprint)}). Message decrypted.`);
+      setStatus(`${signer ? describeSigner(signer) : "Signature verified."} Key ${formatFingerprint(result.signerFingerprint)}.`);
     } catch (error) {
       decryptedMessageOutput.textContent = "Decryption failed";
       throw error;
@@ -377,7 +432,10 @@ function confirmAction(title: string, message: string, label = "Delete contact")
   confirmationDialog.returnValue = "cancel";
   return new Promise((resolve) => {
     confirmationDialog.addEventListener("close", () => {
-      if (confirmationDialog.returnValue !== "confirm") newVaultPassphraseInput.value = "";
+      if (confirmationDialog.returnValue !== "confirm") {
+        newVaultPassphraseInput.value = "";
+        rotatePassphraseInput.value = "";
+      }
       resolve(confirmationDialog.returnValue === "confirm");
     }, { once: true });
     confirmationDialog.showModal();
@@ -405,16 +463,18 @@ function clearActiveKeys(): void {
   for (const card of cards) card.keyInput.value = "";
   vaultPassphraseInput.value = "";
   newVaultPassphraseInput.value = "";
+  rotatePassphraseInput.value = "";
   document.querySelectorAll<HTMLDetailsElement>("details").forEach((details) => { details.open = false; });
   renderTrust();
   renderControls();
 }
 
-async function renderMessageRecipients(): Promise<void> {
+/** Shows who a message is encrypted to and returns how many keys that is. */
+async function renderMessageRecipients(): Promise<number> {
   const armored = encryptedPackageInput.value.trim();
   if (!armored) {
     messageRecipients.textContent = "No message";
-    return;
+    return 0;
   }
   try {
     const ids = await getMessageRecipientKeyIds(armored);
@@ -422,9 +482,13 @@ async function renderMessageRecipients(): Promise<void> {
     const recipient = session.recipientPublicKey ? getKeyIds(session.recipientPublicKey) : [];
     messageRecipients.textContent = ids.map((id) => own.includes(id)
       ? `${id} (you)`
-      : recipient.includes(id) ? `${id} (recipient)` : `${id} (unknown key)`).join(", ") || "No public-key recipients";
+      : recipient.includes(id)
+        ? `${id} (recipient)`
+        : `${id} (${extraRecipientLabels.get(id) ?? "unknown key"})`).join(", ") || "No public-key recipients";
+    return ids.length;
   } catch {
     messageRecipients.textContent = "Not a readable OpenPGP message";
+    return 0;
   }
 }
 
@@ -451,6 +515,9 @@ function renderControls(): void {
   generateKeysButton.disabled = isBusy;
   deleteVaultButton.hidden = !view.canDeleteVault;
   deleteVaultButton.disabled = isBusy || !storageReady;
+  rotateKeyForm.hidden = !view.canRotateKey;
+  rotateKeyButton.disabled = isBusy || !storageReady;
+  rotatePassphraseInput.disabled = isBusy || rotateKeyForm.hidden || !storageReady;
   replaceVaultForm.hidden = !view.canReplaceVault && !view.canCreateInAdvanced;
   replaceVaultButton.textContent = view.canReplaceVault ? "Replace vault" : "Create vault";
   replaceVaultButton.disabled = isBusy || !storageReady;
@@ -468,6 +535,7 @@ function renderControls(): void {
     card.keyInput.disabled = isBusy;
   }
   plaintextInput.disabled = isBusy;
+  extraRecipientsInput.disabled = isBusy;
   encryptedPackageInput.disabled = isBusy;
   app?.setAttribute("aria-busy", String(isBusy));
   contactController.setBusy(isBusy);
@@ -497,6 +565,7 @@ async function runOperation(message: string, action: () => Promise<void>): Promi
   } finally {
     vaultPassphraseInput.value = "";
     newVaultPassphraseInput.value = "";
+    rotatePassphraseInput.value = "";
     isBusy = false;
     renderControls();
   }

@@ -112,3 +112,5 @@ dialog p { color: #52606a; font-size: 0.9rem; }
 .identity-summary .button-row button { flex: 0 1 220px; }
 #identity-fields { flex: 2 1 420px; }
 #identity-fields[hidden] { display: none; }
+.spaced-label { margin-top: 12px; }
+#extra-recipients { width: 100%; }

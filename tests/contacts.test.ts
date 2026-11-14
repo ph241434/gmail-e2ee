@@ -101,6 +101,7 @@ describe("persistent OpenPGP contacts and trust", () => {
     expect(updated.key.verifiedAt).toBeNull();
     expect(updated.key.changes).toEqual([expect.objectContaining({
       previousFingerprint: contact.key.fingerprint,
+      previousPublicKeyArmored: contact.key.publicKeyArmored,
       fingerprint: updated.key.fingerprint,
       previousVerifiedAt: contact.key.verifiedAt
     })]);
@@ -277,6 +278,21 @@ describe("persistent OpenPGP contacts and trust", () => {
       ...changed.key, changes: [{ ...changed.key.changes[0], previousFingerprint: changed.key.fingerprint }]
     } });
     await expect(store.get(contact.id)).rejects.toThrow("history");
+  });
+
+  test("a substituted previous key in the history is rejected", async () => {
+    const contact = await verified();
+    const changed = await store.updateKey(contact.id, contact.revision, aliceReplacementKey);
+    await writeRaw(factory, { ...changed, key: {
+      ...changed.key, changes: [{ ...changed.key.changes[0], previousPublicKeyArmored: bobKey }]
+    } });
+    await expect(store.get(contact.id)).rejects.toThrow("previous public key");
+  });
+
+  test("finds a contact by address, whatever its letter case", async () => {
+    const contact = await verified();
+    expect(await store.findByEmail(" ALICE@Example.Test ")).toEqual(contact);
+    expect(await store.findByEmail("nobody@example.test")).toBeUndefined();
   });
 
   test("unavailable contact storage never reports a successful read or save", async () => {
