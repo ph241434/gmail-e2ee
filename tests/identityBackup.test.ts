@@ -86,6 +86,21 @@ describe("private key export and import", () => {
     await expect(encryptMessage("still works", [], identity.privateKey)).resolves.toContain("BEGIN PGP MESSAGE");
   });
 
+  test("never exports a salt or IV that GnuPG would store as text", async () => {
+    // GnuPG fails with "Bad passphrase" on keys whose salt or IV looks like text; see exportPrivateKey.
+    // Unfiltered, about one export in ten would trip this, so 30 exports make a regression very likely to show.
+    const forcesHex = (data: Uint8Array) => data[0] === 0 || data[0] >= 0x80 ||
+      data.some((byte) => (byte < 0x20 && ![8, 9, 10, 11, 12, 13].includes(byte)) || (byte >= 0x7f && byte <= 0xa0));
+    for (let round = 0; round < 30; round += 1) {
+      const locked = await openpgp.readPrivateKey({ armoredKey: await exportPrivateKey(identity, EXPORT_PASSPHRASE) });
+      for (const { keyPacket } of locked.getKeys()) {
+        const { iv, s2k } = keyPacket as unknown as { iv: Uint8Array; s2k: { salt: Uint8Array } };
+        expect(forcesHex(iv)).toBe(true);
+        expect(forcesHex(s2k.salt)).toBe(true);
+      }
+    }
+  }, 60_000);
+
   test("requires a real export passphrase", async () => {
     await expect(exportPrivateKey(identity, "short")).rejects.toBeInstanceOf(IdentityBackupError);
   });

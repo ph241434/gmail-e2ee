@@ -18,7 +18,7 @@ Implemented:
 - the contact email must be one of the key's self-signed user IDs
 - replaced contact keys are kept, so mail signed with a previously verified key can still be checked
 - tested round trips with a real GnuPG in both directions
-- 108 automated tests
+- 109 automated tests
 
 Not yet implemented:
 - Gmail integration and browser-extension APIs
@@ -91,7 +91,7 @@ Everything is under **Backup and import** (`src/pgp/identityBackup.ts`):
 
 - **Download backup** saves the sealed vault as a JSON file. It contains no unencrypted key material and opens only with the vault passphrase, so it is as strong as that passphrase. Retired keys are included.
 - **Restore backup** opens the file with its passphrase first and saves it only if that succeeds, so a damaged file or wrong passphrase can never replace a working vault.
-- **Export private key** writes the current key as a standard armored private key protected by a passphrase you choose, for `gpg --import` or another OpenPGP app. Retired keys are not included.
+- **Export private key** writes the current key as a standard armored private key protected by a passphrase you choose, for `gpg --import` or another OpenPGP app. Retired keys are not included.  The export avoids salt and IV values that GnuPG mishandles; without that, about one exported key in ten failed in GnuPG with "Bad passphrase".
 - **Import key** takes an existing armored private key, for example from `gpg --export-secret-keys --armor`, unlocks it with its own passphrase if it has one, and seals it in a new vault. Only version 4 keys with valid signing and encryption keys are accepted.
 
 Restoring or importing replaces the saved vault after a confirmation. Passphrase fields and a pasted private key are cleared after every operation.

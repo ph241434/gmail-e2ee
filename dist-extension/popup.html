@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Gmail E2EE</title>
+    <script type="module" crossorigin src="./popup.js"></script>
+    <link rel="stylesheet" crossorigin href="./assets/identityVaultStorage-ByPXmyFl.css">
+    <link rel="stylesheet" crossorigin href="./assets/popup-B9fZKdbS.css">
+  </head>
+  <body class="popup-body">
+    <main class="popup">
+      <header class="masthead">
+        <h1>Gmail E2EE</h1>
+        <span id="lock-status" class="status-badge" role="status">Checking...</span>
+      </header>
+      <p id="popup-message" class="operation-status" role="status" aria-live="polite"></p>
+
+      <div id="identity-summary" class="identity-summary" hidden>
+        <p><span id="identity-user-id" class="key-name"></span></p>
+        <code id="identity-fingerprint" class="fingerprint-value" aria-label="Your OpenPGP fingerprint"></code>
+      </div>
+
+      <form id="unlock-form" class="popup-form" hidden>
+        <label for="unlock-passphrase">Vault passphrase</label>
+        <input id="unlock-passphrase" type="password" minlength="12" maxlength="1024" required
+          autocomplete="current-password" autocapitalize="none" spellcheck="false">
+        <button id="unlock" type="submit">Unlock</button>
+      </form>
+
+      <div class="button-row">
+        <button id="lock" class="secondary-button" type="button" hidden>Lock</button>
+        <button id="open-key-manager" class="secondary-button" type="button">Open key manager</button>
+      </div>
+    </main>
+  </body>
+</html>

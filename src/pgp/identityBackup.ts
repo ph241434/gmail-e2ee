@@ -127,11 +127,38 @@ export async function exportPrivateKey(identity: UnlockedIdentity, exportPassphr
       `Export passphrase must contain at least ${IDENTITY_VAULT_MIN_PASSPHRASE_LENGTH} characters.`
     );
   }
-  // encryptKey works on a clone, so the unlocked identity stays usable.
-  const locked = await openpgp.encryptKey({
-    privateKey: identity.privateKey, passphrase: exportPassphrase, config: OPENPGP_CONFIG
-  });
-  return locked.armor();
+  // encryptKey works on a clone, so the unlocked identity stays usable. Each call draws
+  // a fresh random salt and IV, so retrying until GnuPG can read the result is cheap.
+  for (let attempt = 0; attempt < MAX_EXPORT_ATTEMPTS; attempt += 1) {
+    const locked = await openpgp.encryptKey({
+      privateKey: identity.privateKey, passphrase: exportPassphrase, config: OPENPGP_CONFIG
+    });
+    if (locked.getKeys().every((key) => isReadableByGnuPg(key.keyPacket))) return locked.armor();
+  }
+  throw new IdentityBackupError("Unable to export the private key. Try again.");
+}
+
+/** About one export in ten needs a retry, so this many failures in a row will not happen by chance. */
+const MAX_EXPORT_ATTEMPTS = 40;
+
+/**
+ * Works around a GnuPG defect. `gpg --batch --import` stores a protected key for later
+ * conversion, and gpg-agent writes the key's salt and IV to its key file as text when
+ * they happen to look like text. Such a key then fails with "Bad passphrase" (seen with
+ * GnuPG 2.4.4 and 2.4.8). Values that look binary are written as hex and work, so only
+ * those are exported. The salt and IV are public, so excluding the few text-like values
+ * costs nothing.
+ */
+function isReadableByGnuPg(packet: unknown): boolean {
+  const { iv, s2k } = packet as { iv?: Uint8Array | null; s2k?: { salt?: Uint8Array | null } | null };
+  return [iv, s2k?.salt].every((value) => !value || !looksLikeText(value));
+}
+
+/** Mirrors libgcrypt's choice between quoted text and hex when printing an S-expression. */
+function looksLikeText(data: Uint8Array): boolean {
+  if (data.length === 0 || data[0] === 0 || data[0] >= 0x80) return false;
+  const textControls = [0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d];
+  return data.every((byte) => !(byte < 0x20 || (byte >= 0x7f && byte <= 0xa0)) || textControls.includes(byte));
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

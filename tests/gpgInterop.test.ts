@@ -70,14 +70,17 @@ describe.skipIf(!hasGpg)("GnuPG interoperability", () => {
     expect(result.signerFingerprint).toBe(bob.fingerprint);
   }, 60_000);
 
-  test("GnuPG imports our exported private key and reads mail with it", async () => {
-    const carol = await createTemporaryIdentity({ name: "Carol", email: "carol@example.test" });
-    const exported = await exportPrivateKey(carol, "export passphrase for gpg");
-    gpg(["--pinentry-mode", "loopback", "--passphrase", "export passphrase for gpg", "--import"], exported);
-    const armored = await encryptMessage("For Carol's other device.", [carol.publicKey.key], pavel);
-    const result = gpg(["--pinentry-mode", "loopback", "--passphrase", "export passphrase for gpg", "--decrypt"], armored);
-    expect(result.stdout).toContain("For Carol's other device.");
-  }, 60_000);
+  test("GnuPG imports our exported private keys and reads mail with them", async () => {
+    // Several keys, because GnuPG's handling depends on each export's random salt and IV.
+    for (const name of ["carol", "dave", "erin", "frank"]) {
+      const owner = await createTemporaryIdentity({ name, email: `${name}@example.test` });
+      const exported = await exportPrivateKey(owner, "export passphrase for gpg");
+      gpg(["--pinentry-mode", "loopback", "--passphrase", "export passphrase for gpg", "--import"], exported);
+      const armored = await encryptMessage(`For ${name}'s other device.`, [owner.publicKey.key], pavel);
+      const result = gpg(["--pinentry-mode", "loopback", "--passphrase", "export passphrase for gpg", "--decrypt"], armored);
+      expect(result.stdout).toContain(`For ${name}'s other device.`);
+    }
+  }, 120_000);
 
   test("we import a private key exported by GnuPG", async () => {
     const exported = gpg(["--armor", "--export-secret-keys", "bob@example.test"]).stdout;
