@@ -67,13 +67,22 @@ function probeProtectedKeyImport(): { works: boolean; detail: string } {
 }
 
 /**
- * Known open issue: GnuPG 2.4.4 as packaged in Ubuntu 24.04 (the CI runner) imports a key
- * exported by this app but then rejects its passphrase, every time, although the control
- * above passes there. GnuPG 2.4.7 and 2.4.8 accept the same keys. The cause has not been
- * found. On 2.4.4 the test is therefore expected to fail, so CI reports it if that changes.
+ * Known open issue: GnuPG 2.4.8 with libgcrypt 1.12.0 (Ubuntu 26.04 and the CI runner)
+ * does not reliably accept a key exported by this app. The same key file is accepted or
+ * rejected depending on things unrelated to the key, such as the length of the path to
+ * GnuPG's home folder, while the control above passes. The cause has not been found.
+ * GnuPG 2.4.7 with libgcrypt 1.9.4 accepts the keys. Because the outcome on the affected
+ * build is not stable, the test is skipped there rather than marked as an expected failure.
  */
 const gpgVersionNumber = /gpg \(GnuPG\) (\d+\.\d+\.\d+)/.exec(gpgVersion.stdout ?? "")?.[1];
-const exportedKeyKnownToFail = gpgVersionNumber === "2.4.4";
+const libgcryptVersion = /libgcrypt (\d+\.\d+)/.exec(gpgVersion.stdout ?? "")?.[1];
+const exportedKeyUnreliable = gpgVersionNumber === "2.4.8" && libgcryptVersion === "1.12";
+if (exportedKeyUnreliable) {
+  console.warn(
+    `GnuPG ${gpgVersionNumber} with libgcrypt ${libgcryptVersion} is known not to accept keys exported by this app reliably. ` +
+    "Skipping the test that imports our exported keys into GnuPG. See the known issue in the README."
+  );
+}
 
 const protectedKeyImport = hasGpg ? probeProtectedKeyImport() : { works: false, detail: "gpg not found" };
 if (hasGpg && !protectedKeyImport.works) {
@@ -136,7 +145,7 @@ describe.skipIf(!hasGpg)("GnuPG interoperability", () => {
     expect(result.signerFingerprint).toBe(bob.fingerprint);
   }, 60_000);
 
-  const exportedKeyTest = !protectedKeyImport.works ? test.skip : exportedKeyKnownToFail ? test.fails : test;
+  const exportedKeyTest = !protectedKeyImport.works || exportedKeyUnreliable ? test.skip : test;
   exportedKeyTest("GnuPG imports our exported private keys and reads mail with them", async () => {
     // Several keys, because GnuPG's handling depends on each export's random salt and IV.
     for (const name of ["carol", "dave", "erin", "frank"]) {

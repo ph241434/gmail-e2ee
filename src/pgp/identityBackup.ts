@@ -142,12 +142,12 @@ export async function exportPrivateKey(identity: UnlockedIdentity, exportPassphr
 const MAX_EXPORT_ATTEMPTS = 40;
 
 /**
- * Works around a GnuPG defect. `gpg --batch --import` stores a protected key for later
- * conversion, and gpg-agent writes the key's salt and IV to its key file as text when
- * they happen to look like text. Such a key then fails with "Bad passphrase" (seen with
- * GnuPG 2.4.4 and 2.4.8). Values that look binary are written as hex and work, so only
- * those are exported. The salt and IV are public, so excluding the few text-like values
- * costs nothing.
+ * Works around one GnuPG quirk. After `gpg --batch --import`, GnuPG 2.4.8 (libgcrypt
+ * 1.12.0) was seen to reject a key with "Bad passphrase" whenever its salt looked like
+ * text by libgcrypt's rule below (9 of 9 such keys failed, 30 of 30 others worked, all
+ * else equal). Only values that look binary are exported. The salt and IV are public,
+ * so excluding the few text-like values costs nothing. This does not make export to
+ * that GnuPG build reliable; see the known issue in the README.
  */
 function isReadableByGnuPg(packet: unknown): boolean {
   const { iv, s2k } = packet as { iv?: Uint8Array | null; s2k?: { salt?: Uint8Array | null } | null };
