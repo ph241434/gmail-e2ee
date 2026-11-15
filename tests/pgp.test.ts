@@ -143,6 +143,21 @@ describe("OpenPGP messages", () => {
     await expect(decryptMessage(tampered, alice, [pavel.toPublic()])).rejects.toBeInstanceOf(MessageDecryptionError);
   });
 
+  test("says why a message could not be read", async () => {
+    const reasonFor = (promise: Promise<unknown>) => promise.then(() => "no error", (error: MessageDecryptionError) => error.reason);
+    const fromMallory = await encryptMessage("From Mallory", [alice.toPublic()], mallory);
+    const unsigned = await openpgp.encrypt({ message: await openpgp.createMessage({ text: "x" }), encryptionKeys: alice.toPublic() });
+
+    expect(await reasonFor(decryptMessage("not a message", alice, [pavel.toPublic()]))).toBe("malformed");
+    expect(await reasonFor(decryptMessage(fromMallory, pavel, [mallory.toPublic()]))).toBe("not-for-you");
+    expect(await reasonFor(decryptMessage(unsigned, alice, [pavel.toPublic()]))).toBe("unsigned");
+    expect(await reasonFor(decryptMessage(fromMallory, alice, []))).toBe("unknown-signer");
+    // An unknown signer is reported by key ID, so the reader can say which key to look for.
+    await expect(decryptMessage(fromMallory, alice, [pavel.toPublic()])).rejects.toMatchObject({
+      reason: "unknown-signer", signerKeyIds: [mallory.getKeyID().toHex().toUpperCase()]
+    });
+  });
+
   test("refuses malformed armor", async () => {
     await expect(decryptMessage("not a message", alice, [pavel.toPublic()])).rejects.toThrow("valid armored OpenPGP message");
   });

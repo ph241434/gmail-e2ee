@@ -8,8 +8,21 @@ export class MessageEncryptionError extends Error {
   }
 }
 
+export type DecryptFailureReason =
+  | "malformed"       // not an OpenPGP message
+  | "not-for-you"     // not encrypted to any of the reader's keys
+  | "damaged"         // failed integrity checks
+  | "unsigned"        // decrypted, but carries no signature
+  | "unknown-signer"  // signed by a key that is not among the expected signers
+  | "bad-signature";  // names an expected signer, but the signature does not verify
+
 export class MessageDecryptionError extends Error {
-  constructor(message: string) {
+  constructor(
+    message: string,
+    readonly reason: DecryptFailureReason = "damaged",
+    /** Key IDs the message claims to be signed with, when known. */
+    readonly signerKeyIds: string[] = []
+  ) {
     super(message);
     this.name = "MessageDecryptionError";
   }
@@ -59,30 +72,40 @@ export async function decryptMessage(
   const message = await readArmoredMessage(armoredMessage);
   let result: Awaited<ReturnType<typeof openpgp.decrypt<string>>>;
   try {
+    // Signatures are checked below rather than with expectSigned, so a failure can say
+    // why. The decrypted text stays inside this function unless a signature verifies.
     result = await openpgp.decrypt({
       message,
       decryptionKeys: recipient,
       verificationKeys: expectedSigners,
-      expectSigned: true,
       format: "utf8",
       config: OPENPGP_CONFIG
     }) as typeof result;
   } catch (error) {
-    throw new MessageDecryptionError(describeDecryptFailure(error));
+    const detail = error instanceof Error ? error.message : "";
+    throw /session key|decryption key|No (?:valid )?decryption/i.test(detail)
+      ? new MessageDecryptionError("This message is not encrypted to your key.", "not-for-you")
+      : new MessageDecryptionError("The message failed integrity checks or could not be decrypted.", "damaged");
   }
-  // With expectSigned, openpgp.js has already awaited verification; check explicitly anyway.
+  if (result.signatures.length === 0) {
+    throw new MessageDecryptionError("The message is not signed, so its sender cannot be confirmed.", "unsigned");
+  }
+  let namesExpectedSigner = false;
   for (const signature of result.signatures) {
+    const signer = expectedSigners.find((key) => key.getKeys(signature.keyID).length > 0);
+    if (!signer) continue;
+    namesExpectedSigner = true;
     try {
       await signature.verified;
     } catch {
       continue;
     }
-    const signer = expectedSigners.find((key) => key.getKeys(signature.keyID).length > 0);
-    if (signer) {
-      return { text: result.data, signerFingerprint: normalizeFingerprint(signer.getFingerprint()) };
-    }
+    return { text: result.data, signerFingerprint: normalizeFingerprint(signer.getFingerprint()) };
   }
-  throw new MessageDecryptionError("The message is not signed by the expected sender.");
+  const signerKeyIds = result.signatures.map((signature) => signature.keyID.toHex().toUpperCase());
+  throw namesExpectedSigner
+    ? new MessageDecryptionError("The signature does not match the message.", "bad-signature", signerKeyIds)
+    : new MessageDecryptionError("The message is not signed by the expected sender.", "unknown-signer", signerKeyIds);
 }
 
 /** Lists the key IDs a message is encrypted to, without decrypting it. */
@@ -100,19 +123,8 @@ async function readArmoredMessage(armoredMessage: string): Promise<openpgp.Messa
   try {
     return await openpgp.readMessage({ armoredMessage: armoredMessage.trim(), config: OPENPGP_CONFIG });
   } catch {
-    throw new MessageDecryptionError("Enter a valid armored OpenPGP message.");
+    throw new MessageDecryptionError("Enter a valid armored OpenPGP message.", "malformed");
   }
-}
-
-function describeDecryptFailure(error: unknown): string {
-  const detail = error instanceof Error ? error.message : "";
-  if (/session key|decryption key|No (?:valid )?decryption/i.test(detail)) {
-    return "This message is not encrypted to your key.";
-  }
-  if (/signing key|signature|not signed/i.test(detail)) {
-    return "The message is not signed by the expected sender.";
-  }
-  return "The message failed integrity checks or could not be decrypted.";
 }
 
 function uniqueByFingerprint(keys: openpgp.PublicKey[]): openpgp.PublicKey[] {
