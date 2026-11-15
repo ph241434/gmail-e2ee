@@ -12,16 +12,17 @@ Implemented:
 - sign-then-encrypt messages via [OpenPGP.js](https://openpgpjs.org/) 6.3.2 (RFC 9580), always encrypted to the sender as well as the recipients
 - several recipients per message, looked up by email among verified contacts
 - key rotation that keeps retired keys, so earlier mail stays readable
+- backup and restore of the sealed identity, plus private-key export to and import from other OpenPGP software
 - armored public-key import/export, OpenPGP fingerprints
 - persistent contacts with one public key each, verification, key-change detection and history
 - the contact email must be one of the key's self-signed user IDs
 - replaced contact keys are kept, so mail signed with a previously verified key can still be checked
 - tested round trips with a real GnuPG in both directions
-- 92 automated tests
+- 109 automated tests
 
 Not yet implemented:
 - Gmail integration and browser-extension APIs
-- PGP/MIME (subjects, attachments), key discovery (WKD), backup and recovery
+- PGP/MIME (subjects, attachments), key discovery (WKD)
 
 This is an educational end-to-end encryption proof of concept intended to eventually integrate with Gmail. It deliberately stays local: no Gmail integration, Google APIs, OAuth flow, extension APIs, or key server.
 
@@ -82,7 +83,18 @@ Lock zeroes the private key's secret parameters through OpenPGP.js and drops eve
 
 **Rotate key** (under Advanced key options, while unlocked) generates a new key for the same name and email and re-seals the vault with the old key kept as a retired key. Retired keys are tried when decrypting and are never used to sign. Contacts must import and verify the new public key. **Replace vault**, by contrast, starts a new identity and discards the old keys.
 
-The passphrase policy requires 12 to 1,024 characters. There is no recovery.
+The passphrase policy requires 12 to 1,024 characters. A forgotten passphrase cannot be recovered.
+
+### Backup, restore, export and import
+
+Everything is under **Backup and import** (`src/pgp/identityBackup.ts`):
+
+- **Download backup** saves the sealed vault as a JSON file. It contains no unencrypted key material and opens only with the vault passphrase, so it is as strong as that passphrase. Retired keys are included.
+- **Restore backup** opens the file with its passphrase first and saves it only if that succeeds, so a damaged file or wrong passphrase can never replace a working vault.
+- **Export private key** writes the current key as a standard armored private key protected by a passphrase you choose, for `gpg --import` or another OpenPGP app. Retired keys are not included. The export avoids salt and IV values that look like text, which GnuPG 2.4.8 was seen to mishandle after a batch import. This removes one cause of failure; see the known issue under Interoperability for another.
+- **Import key** takes an existing armored private key, for example from `gpg --export-secret-keys --armor`, unlocks it with its own passphrase if it has one, and seals it in a new vault. Only version 4 keys with valid signing and encryption keys are accepted.
+
+Restoring or importing replaces the saved vault after a confirmation. Passphrase fields and a pasted private key are cleared after every operation.
 
 ## Contacts and Trust
 
@@ -109,9 +121,11 @@ In the demo page, the **Encrypt to** card supplies the main recipient and **Also
 
 ## Interoperability
 
-`tests/gpgInterop.test.ts` drives a real `gpg` binary: GnuPG generates a key, decrypts a message from this app and validates its signature, and encrypts a signed message that this app decrypts and verifies. The test skips itself when `gpg` is not on PATH. GitHub's Ubuntu runners include it, and on Windows the copy in Git for Windows works.
+`tests/gpgInterop.test.ts` drives a real `gpg` binary: GnuPG generates a key, decrypts a message from this app and validates its signature, and encrypts a signed message that this app decrypts and verifies. It also imports a private key exported by this app, and this app imports one exported by GnuPG. The test skips itself when `gpg` is not on PATH. GitHub's Ubuntu runners include it, and on Windows the copy in Git for Windows works.
 
 To try it by hand, copy your public key with **Copy my public key**, import it with `gpg --import`, and paste any message from **Encrypted message (OpenPGP)** into `gpg --decrypt`.
+
+**Known issue: exported private keys and GnuPG 2.4.8 on Ubuntu 26.04.** That build (GnuPG 2.4.8 with libgcrypt 1.12.0, also what the CI runner has) does not reliably accept a private key exported by this app. The same key file is accepted or rejected, with "Bad passphrase" or with "Bad secret key" for the encryption subkey, depending on things that have nothing to do with the key, such as the length of the path to GnuPG's home folder. That points to a defect on the GnuPG side, but the cause has not been found, and the same GnuPG handles keys it exported itself. GnuPG 2.4.7 with libgcrypt 1.9.4 (the copy in Git for Windows) accepts this app's keys. Messages, public keys, and importing a GnuPG key into this app are not affected. The test for exported keys is skipped on the affected build.
 
 ## Threat Model
 
@@ -126,7 +140,8 @@ This does not hide sender and recipient addresses, timestamps, message size, rou
 - **Surreptitious forwarding:** OpenPGP.js 6.3.2 does not write the "intended recipient" signature data, so a recipient can decrypt your signed message and re-encrypt it, signature intact, to someone else. The signature proves you wrote it, not who you wrote it to.
 - Fingerprint verification depends on a separate trusted channel; importing a key proves nothing about who owns it.
 - Contacts, trust records and history are stored unencrypted and are not signed or tamper-proof against code running in this origin.
-- There is no passphrase recovery, key backup, or multi-device sync. Replacing or deleting the vault makes every message encrypted to it unreadable. Rotating the key does not.
+- There is no passphrase recovery and no automatic sync between devices. A backup file or exported key must be moved by hand, and each is only as strong as its passphrase. Replacing or deleting the vault without a backup makes every message encrypted to it unreadable. Rotating the key does not.
+- Contacts and their trust decisions are not part of a backup.
 - Rotation does not publish a revocation for the old key, and contacts learn about the new key only when you send it to them.
 - Messages are plain text. Subjects, attachments and HTML bodies are not handled yet.
 - The OpenPGP.js dependency must be kept up to date. Version 6.1.1, for example, fixed a signature-spoofing flaw (CVE-2025-47934).
@@ -146,7 +161,7 @@ npm run dev
 3. To write to someone else, open **Public key text** on the **Encrypt to** card, paste their armored public key, select **Import recipient key**, optionally **Save as contact**, compare the fingerprint with them, and tick the checkbox. To include more people, list the emails of other verified contacts in **Also send to**.
 4. To read their reply, import their key on the **Expected signer** card the same way, paste their message, and select **Decrypt and verify**.
 
-Under **Advanced key options** you can use a temporary identity that is never saved, rotate your key, or replace or delete the saved vault.
+Under **Advanced key options** you can use a temporary identity that is never saved, rotate your key, or replace or delete the saved vault. Under **Backup and import** you can download or restore a backup, export your key for other OpenPGP apps, or import a key you already have.
 
 The old RSA prototype's data (`gmail-e2ee` and `gmail-e2ee-contacts` databases) is left untouched and is not read by this branch.
 
@@ -161,6 +176,7 @@ src/
   crypto/encoding.ts            Base64 and text helpers
   pgp/
     keys.ts                     pinned OpenPGP config, key generation, public-key parsing, fingerprints
+    identityBackup.ts           backup, restore, private-key export and import
     identityVault.ts            passphrase-sealed identity key, rotation, retired keys
     message.ts                  sign-then-encrypt and decrypt-and-verify
   storage/
@@ -174,6 +190,7 @@ src/
 tests/
   contacts.test.ts
   gpgInterop.test.ts
+  identityBackup.test.ts
   identityVault.test.ts
   identityVaultStorage.test.ts
   keySession.test.ts
@@ -184,6 +201,5 @@ tests/
 ## Next Milestones
 
 - PGP/MIME (RFC 3156) with protected headers, so subjects and attachments are covered.
-- Encrypted backup and restore of the identity, and importing an existing OpenPGP key.
 - Key discovery through WKD.
 - Browser-extension design that keeps keys out of the Gmail page.

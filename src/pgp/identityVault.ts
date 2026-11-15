@@ -152,7 +152,8 @@ export function getDecryptionKeys(identity: UnlockedIdentity): openpgp.PrivateKe
   return [identity.privateKey, ...identity.retiredKeys];
 }
 
-async function sealIdentity(identity: UnlockedIdentity, passphrase: string): Promise<IdentityVault> {
+/** Seals an unlocked identity under a passphrase, with a fresh salt and IV. */
+export async function sealIdentity(identity: UnlockedIdentity, passphrase: string): Promise<IdentityVault> {
   validatePassphrase(passphrase);
   const salt = randomBytes(PBKDF2_SALT_LENGTH_BYTES);
   const iv = randomBytes(AES_GCM_IV_LENGTH_BYTES);
@@ -235,7 +236,8 @@ function aesGcmParameters(
   };
 }
 
-function validateVault(candidate: unknown): IdentityVault {
+/** Checks the shape of stored vault data. It does not prove the data opens. */
+export function validateVault(candidate: unknown): IdentityVault {
   if (!isRecord(candidate) || !isRecord(candidate.kdf) || !isRecord(candidate.wrapping)) {
     throw new Error("Vault format is unsupported.");
   }
