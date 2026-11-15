@@ -93,7 +93,7 @@ Everything is under **Backup and import** (`src/pgp/identityBackup.ts`):
 
 - **Download backup** saves the sealed vault as a JSON file. It contains no unencrypted key material and opens only with the vault passphrase, so it is as strong as that passphrase. Retired keys are included.
 - **Restore backup** opens the file with its passphrase first and saves it only if that succeeds, so a damaged file or wrong passphrase can never replace a working vault.
-- **Export private key** writes the current key as a standard armored private key protected by a passphrase you choose, for `gpg --import` or another OpenPGP app. Retired keys are not included.  The export avoids salt and IV values that GnuPG mishandles; without that, about one exported key in ten failed in GnuPG with "Bad passphrase".
+- **Export private key** writes the current key as a standard armored private key protected by a passphrase you choose, for `gpg --import` or another OpenPGP app. Retired keys are not included. The export avoids salt and IV values that look like text, which GnuPG 2.4.8 was seen to mishandle after a batch import. This removes one cause of failure; see the known issue under Interoperability for another.
 - **Import key** takes an existing armored private key, for example from `gpg --export-secret-keys --armor`, unlocks it with its own passphrase if it has one, and seals it in a new vault. Only version 4 keys with valid signing and encryption keys are accepted.
 
 Restoring or importing replaces the saved vault after a confirmation. Passphrase fields and a pasted private key are cleared after every operation.
@@ -127,7 +127,7 @@ In the demo page, the **Encrypt to** card supplies the main recipient and **Also
 
 To try it by hand, copy your public key with **Copy my public key**, import it with `gpg --import`, and paste any message from **Encrypted message (OpenPGP)** into `gpg --decrypt`.
 
-**Known issue: exported private keys and GnuPG 2.4.4.** GnuPG 2.4.4 as packaged in Ubuntu 24.04 imports a private key exported by this app but then rejects its passphrase ("Bad passphrase"), although it handles its own exported keys. GnuPG 2.4.7 (Windows) and 2.4.8 (Ubuntu 26.04) accept the same keys. The cause has not been found. Messages and public keys are not affected, and neither is importing a GnuPG key into this app. On 2.4.4 the test for this is marked as an expected failure and logs how the rejected key was protected.
+**Known issue: exported private keys and GnuPG 2.4.8 on Ubuntu 26.04.** That build (GnuPG 2.4.8 with libgcrypt 1.12.0, also what the CI runner has) does not reliably accept a private key exported by this app. The same key file is accepted or rejected, with "Bad passphrase" or with "Bad secret key" for the encryption subkey, depending on things that have nothing to do with the key, such as the length of the path to GnuPG's home folder. That points to a defect on the GnuPG side, but the cause has not been found, and the same GnuPG handles keys it exported itself. GnuPG 2.4.7 with libgcrypt 1.9.4 (the copy in Git for Windows) accepts this app's keys. Messages, public keys, and importing a GnuPG key into this app are not affected. The test for exported keys is skipped on the affected build.
 
 ## Chrome Extension
 
