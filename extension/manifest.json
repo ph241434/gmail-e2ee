@@ -17,7 +17,20 @@
     "page": "options.html",
     "open_in_tab": true
   },
+  "content_scripts": [
+    {
+      "matches": ["https://mail.google.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["viewer.html", "compose.html"],
+      "matches": ["https://mail.google.com/*"]
+    }
+  ],
   "content_security_policy": {
-    "extension_pages": "script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+    "extension_pages": "script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors https://mail.google.com"
   }
 }

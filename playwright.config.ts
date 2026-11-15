@@ -7,7 +7,13 @@ export default defineConfig({
   testMatch: "**/*.e2e.ts",
   timeout: 90_000,
   expect: { timeout: 15_000 },
-  // Each test starts its own browser profile with the extension installed.
+  // Each test starts its own browser profiles with the extension installed.
   workers: 1,
-  reporter: "list"
+  reporter: "list",
+  // A local page that copies the parts of Gmail's markup the extension relies on.
+  webServer: {
+    command: "node e2e/server.mjs",
+    url: "http://localhost:4173/mail",
+    reuseExistingServer: false
+  }
 });

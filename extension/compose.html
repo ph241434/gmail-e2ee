@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Write an encrypted message</title>
+  </head>
+  <body class="frame-body">
+    <main class="frame">
+      <p id="compose-status" class="frame-status" role="status" aria-live="polite">Loading...</p>
+      <button id="compose-unlock" type="button" hidden>Unlock Gmail E2EE</button>
+      <form id="compose-form" class="compose-form" hidden>
+        <label for="compose-recipients">Encrypt to (checked against your verified contacts)</label>
+        <input id="compose-recipients" type="text" spellcheck="false" autocomplete="off"
+          placeholder="alice@example.com, bob@example.com">
+        <label for="compose-text">Message (stays in this box until it is encrypted)</label>
+        <textarea id="compose-text" spellcheck="true"></textarea>
+        <ul id="compose-problems" class="frame-problems" role="alert" hidden></ul>
+        <div class="button-row">
+          <button id="compose-encrypt" type="submit">Encrypt and insert</button>
+          <button id="compose-cancel" class="secondary-button" type="button">Cancel</button>
+        </div>
+      </form>
+    </main>
+    <script type="module" src="./compose.ts"></script>
+  </body>
+</html>

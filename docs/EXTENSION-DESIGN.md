@@ -86,6 +86,12 @@ Frames check `event.origin` and `event.source`, and post back with an explicit t
 - `viewer.html` and `compose.html` are web-accessible only to `https://mail.google.com`.
 - Extension pages use `script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors https://mail.google.com`, so no inline or remote script can run and no other site can frame the pages.
 
+## Testing
+
+`npm run test:e2e` builds a test variant of the extension (`dist-extension-e2e/`) and loads it into Chromium with Playwright. The variant differs from the real build in one way: it also accepts `http://localhost:4173`, where `e2e/fake-gmail.html` stands in for Gmail. That page copies the markup the content script relies on and records every window message and every change to its compose box, so tests can assert that plaintext never reaches the page. The real build contains no trace of the test origin.
+
+The stand-in page is not Gmail. Everything in `extension/content/gmailDom.ts` encodes an assumption about Gmail's markup and needs a manual check against the real site.
+
 ## Known limits
 
 - **Gmail's page structure is not a stable interface.** Finding compose boxes and recipient fields relies on attributes Gmail has used for years, but Google can change them. Reading relies only on the armored text itself. When a lookup fails, the compose frame still works with recipients typed by hand, and the armored text can be copied.

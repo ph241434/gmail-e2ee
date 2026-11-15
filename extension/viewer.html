@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Decrypted message</title>
+  </head>
+  <body class="frame-body">
+    <main class="frame">
+      <p id="viewer-status" class="frame-status" role="status" aria-live="polite">Waiting for the message...</p>
+      <p id="viewer-warning" class="frame-warning" role="alert" hidden></p>
+      <pre id="viewer-text" class="frame-text" hidden></pre>
+      <button id="viewer-unlock" type="button" hidden>Unlock Gmail E2EE</button>
+    </main>
+    <script type="module" src="./viewer.ts"></script>
+  </body>
+</html>

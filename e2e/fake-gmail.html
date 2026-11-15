@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Stand-in Gmail page</title>
+    <style>
+      body { font: 14px/1.5 system-ui, sans-serif; margin: 20px; }
+      .adn { border-top: 1px solid #ccc; padding: 10px 0; }
+      .compose { border: 1px solid #999; margin-top: 30px; padding: 10px; width: 620px; }
+      .editable { min-height: 85px; border: 1px solid #ddd; padding: 6px; }
+    </style>
+  </head>
+  <body>
+    <!--
+      A stand-in for the Gmail website, used only by browser tests. It copies the parts of
+      Gmail's markup the content script relies on: message bodies in div.a3s with the sender
+      in span.gD[email], and a compose form with a subjectbox field, recipient chips carrying
+      data-hovercard-id, and an editable div with role="textbox" and g_editable="true".
+
+      It also plays the hostile page: it records every window message it can see and
+      everything that appears in its compose box, so tests can prove plaintext never reached it.
+    -->
+    <div role="main">
+      <h2 class="hP">Thread</h2>
+      <div id="thread" role="list"></div>
+    </div>
+
+    <div class="compose" role="dialog" aria-label="New Message">
+      <form id="compose-form">
+        <div aria-label="To" id="to-chips"></div>
+        <!-- Older Gmail layouts keep recipients in form fields instead of chips. -->
+        <textarea name="cc" hidden></textarea>
+        <input name="subjectbox" placeholder="Subject" value="Lunch on Friday">
+        <div id="body" class="Am Al editable" contenteditable="true" role="textbox" aria-label="Message Body"
+          aria-multiline="true" g_editable="true"></div>
+        <button id="send" type="button">Send</button>
+      </form>
+    </div>
+
+    <script>
+      const params = new URLSearchParams(location.search);
+      const from = params.get("from") || "someone@example.test";
+
+      // What a hostile page can observe.
+      window.pageSaw = { messages: [], composeSnapshots: [] };
+      window.addEventListener("message", (event) => window.pageSaw.messages.push(JSON.stringify(event.data)));
+      const body = document.getElementById("body");
+      new MutationObserver(() => window.pageSaw.composeSnapshots.push(body.innerText))
+        .observe(body, { childList: true, subtree: true, characterData: true });
+
+      document.querySelector('[name="cc"]').value = params.get("cc") || "";
+      for (const email of (params.get("to") || "").split(",").filter(Boolean)) {
+        const chip = document.createElement("div");
+        chip.setAttribute("role", "option");
+        chip.setAttribute("data-hovercard-id", email);
+        chip.textContent = email.split("@")[0];
+        document.getElementById("to-chips").append(chip);
+      }
+
+      // Shows a message the way Gmail lays one out. `layout` picks how the text is broken into lines.
+      window.showMessage = ({ sender, text, layout = "br", quoted = false }) => {
+        const message = document.createElement("div");
+        message.className = "adn";
+        message.setAttribute("role", "listitem");
+        const header = document.createElement("div");
+        const senderName = document.createElement("span");
+        senderName.className = "gD";
+        senderName.setAttribute("email", sender);
+        senderName.textContent = sender;
+        const recipient = document.createElement("span");
+        recipient.className = "g2";
+        recipient.setAttribute("email", from);
+        recipient.textContent = " to me";
+        header.append(senderName, recipient);
+        const content = document.createElement("div");
+        content.className = "a3s aiL";
+        const target = quoted ? document.createElement("blockquote") : content;
+        if (quoted) content.append("On Friday someone wrote:", target);
+        for (const line of text.split("\n")) {
+          if (layout === "div") {
+            const row = document.createElement("div");
+            row.textContent = quoted ? "> " + line : line;
+            target.append(row);
+          } else {
+            target.append(document.createTextNode(line), document.createElement("br"));
+          }
+        }
+        message.append(header, content);
+        document.getElementById("thread").append(message);
+      };
+
+      // "Sending" moves the compose body into the thread as a message from this user.
+      document.getElementById("send").addEventListener("click", () => {
+        window.showMessage({ sender: from, text: body.innerText.trim() });
+        body.replaceChildren();
+      });
+    </script>
+  </body>
+</html>
