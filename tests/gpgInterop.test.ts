@@ -13,7 +13,66 @@ import { decryptMessage, encryptMessage } from "../src/pgp/message";
  * Exchanges messages with a real GnuPG in both directions. Skipped when `gpg` is not
  * on PATH. GitHub's ubuntu-latest runners and Git for Windows both ship it.
  */
-const hasGpg = spawnSync("gpg", ["--version"], { encoding: "utf8" }).status === 0;
+const gpgVersion = spawnSync("gpg", ["--version"], { encoding: "utf8" });
+const hasGpg = gpgVersion.status === 0;
+
+/** Runs gpg against a throwaway home directory, with no prompts. */
+function runGpg(gpgHome: string, args: string[], input?: string) {
+  return spawnSync("gpg", ["--homedir", gpgHome, "--batch", "--yes", "--no-tty", "--trust-model", "always", ...args], {
+    input, encoding: "utf8", timeout: 60_000
+  });
+}
+
+function withGpgHome<T>(action: (gpgHome: string) => T): T {
+  const home = mkdtempSync(join(tmpdir(), "gmail-e2ee-gpg-"));
+  const gpgHome = toGpgPath(home);
+  try {
+    return action(gpgHome);
+  } finally {
+    spawnSync("gpgconf", ["--homedir", gpgHome, "--kill", "gpg-agent"]);
+    rmSync(home, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Control for the key-export test. Some GnuPG builds cannot use a passphrase-protected
+ * secret key after a batch import, even one they exported themselves. Where that is so,
+ * a failure to use our exported key says nothing about our export, so that test is skipped.
+ */
+function probeProtectedKeyImport(): { works: boolean; detail: string } {
+  const passphrase = ["--pinentry-mode", "loopback", "--passphrase", "control passphrase"];
+  return withGpgHome((source) => {
+    const steps: string[] = [];
+    const run = (home: string, label: string, args: string[], input?: string) => {
+      const result = runGpg(home, args, input);
+      steps.push(`${label}: ${result.status === 0 ? "ok" : (result.stderr ?? "").trim().split("\n").at(-1)}`);
+      return result;
+    };
+    run(source, "generate", [...passphrase, "--quick-gen-key", "Control <control@example.test>", "ed25519", "sign", "never"]);
+    const fingerprint = runGpg(source, ["--with-colons", "--list-keys", "control@example.test"]).stdout
+      ?.split("\n").find((line) => line.startsWith("fpr:"))?.split(":")[9] ?? "";
+    run(source, "add subkey", [...passphrase, "--quick-add-key", fingerprint, "cv25519", "encr", "never"]);
+    const message = run(source, "encrypt", ["--armor", "--encrypt", "--recipient", "control@example.test"], "control text").stdout;
+    // Each export is protected with fresh random values, so a few attempts rule out bad luck.
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      const exported = run(source, `export ${attempt}`, [...passphrase, "--armor", "--export-secret-keys", "control@example.test"]).stdout;
+      const works = withGpgHome((target) => {
+        run(target, `import ${attempt}`, [...passphrase, "--import"], exported);
+        return run(target, `decrypt ${attempt}`, [...passphrase, "--decrypt"], message).stdout?.includes("control text") ?? false;
+      });
+      if (works) return { works: true, detail: steps.join("; ") };
+    }
+    return { works: false, detail: steps.join("; ") };
+  });
+}
+
+const protectedKeyImport = hasGpg ? probeProtectedKeyImport() : { works: false, detail: "gpg not found" };
+if (hasGpg && !protectedKeyImport.works) {
+  console.warn(
+    `${gpgVersion.stdout.split("\n")[0]} cannot use a protected key it exported itself after a batch import ` +
+    `(${protectedKeyImport.detail}). Skipping the test that imports our exported keys into GnuPG.`
+  );
+}
 
 describe.skipIf(!hasGpg)("GnuPG interoperability", () => {
   let home: string;
@@ -22,9 +81,7 @@ describe.skipIf(!hasGpg)("GnuPG interoperability", () => {
   let bob: ParsedPublicKey;
 
   function gpg(args: string[], input?: string) {
-    const result = spawnSync("gpg", ["--homedir", gpgHome, "--batch", "--yes", "--no-tty", "--trust-model", "always", ...args], {
-      input, encoding: "utf8", timeout: 60_000
-    });
+    const result = runGpg(gpgHome, args, input);
     if (result.status !== 0) throw new Error(`gpg ${args[0]} failed: ${result.stderr}`);
     return result;
   }
@@ -70,7 +127,7 @@ describe.skipIf(!hasGpg)("GnuPG interoperability", () => {
     expect(result.signerFingerprint).toBe(bob.fingerprint);
   }, 60_000);
 
-  test("GnuPG imports our exported private keys and reads mail with them", async () => {
+  test.skipIf(!protectedKeyImport.works)("GnuPG imports our exported private keys and reads mail with them", async () => {
     // Several keys, because GnuPG's handling depends on each export's random salt and IV.
     for (const name of ["carol", "dave", "erin", "frank"]) {
       const owner = await createTemporaryIdentity({ name, email: `${name}@example.test` });
