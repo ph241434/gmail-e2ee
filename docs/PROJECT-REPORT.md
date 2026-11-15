@@ -72,20 +72,20 @@ The Gmail page is treated as untrusted: it belongs to the provider the tool prot
 | Unit tests | 133 tests in 10 files pass |
 | Web page build, extension build | Pass |
 | Browser tests | 10 Playwright tests pass in Chromium with the built extension loaded |
-| GnuPG interoperability | Messages both ways, and keys both ways, with GnuPG 2.4.7 (Windows) and 2.4.8 (Ubuntu 26.04). One open issue with 2.4.4, below |
+| GnuPG interoperability | Messages and public keys both ways, and importing a GnuPG private key, with GnuPG 2.4.7 (Windows) and 2.4.8 (Linux). Exporting a private key to GnuPG works with 2.4.7 only; see the open issue below |
 
 The browser tests use two separate browser profiles that exchange and verify keys and then write, send and read a message through `e2e/fake-gmail.html`. That page copies the Gmail markup the content script relies on, and records every window message and every change to its own compose box. The tests assert that the plaintext never appears in anything the page can see, and that page scripts cannot reach into the frames.
 
 Two things found during this work are worth knowing:
 
-- **GnuPG and exported keys.** GnuPG rejects a batch-imported protected key with "Bad passphrase" when the key's random salt happens to look like text, roughly one export in twenty. The export now avoids such values; the cause was confirmed by test (6 of 6 text-like salts fail, 30 of 30 filtered exports work on GnuPG 2.4.8).
+- **GnuPG and text-like salts.** After a batch import, GnuPG 2.4.8 rejected an exported key with "Bad passphrase" whenever the key's random salt happened to look like text (9 of 9 such keys failed, 30 of 30 others worked, all else equal). The export now avoids such values. This removed one cause of failure, not all of them; see the open issue below.
 - **Clipped messages.** A browser test caught the page scan matching the wrong block when a clipped message was followed by a complete one. Each block is now matched from its own start marker.
 
 ## Known Open Issue
 
-GnuPG 2.4.4 as packaged in Ubuntu 24.04, which is what the CI runner has, imports a private key exported by this app but then rejects its passphrase with "Bad passphrase". It fails every time there, while the same GnuPG re-imports its own exported keys, and GnuPG 2.4.7 and 2.4.8 accept this app's keys. GnuPG's release notes list no related fix, so the cause is probably specific to that build. It has not been found, because that GnuPG version was not available to test against locally.
+GnuPG 2.4.8 with libgcrypt 1.12.0, which is what Ubuntu 26.04 and the CI runner have, does not reliably accept a private key exported by this app. The same key file is accepted or rejected, with "Bad passphrase" or with "Bad secret key" for the encryption subkey, depending on things that have nothing to do with the key: the length of the path to GnuPG's home folder, whether another key was created there first, and whether the agent has a config file. The key files GnuPG stores are identical in the passing and failing cases. That points to a defect on the GnuPG side, but the cause has not been found. The same GnuPG handles keys it exported itself, which use different protection settings (AES-128 and SHA-1, where this app's export uses AES-256 and SHA-256). GnuPG 2.4.7 with libgcrypt 1.9.4, the copy in Git for Windows, accepts this app's keys.
 
-Only private-key export to GnuPG 2.4.4 is affected. Messages, public keys, and importing a GnuPG key into this app all work there. On 2.4.4 the test is marked as an expected failure, so CI reports it if the behaviour changes, and it logs how the rejected key was protected.
+Only private-key export to that GnuPG build is affected. Messages, public keys, and importing a GnuPG key into this app all work there. Because the outcome is not stable, the test for exported keys is skipped on that build, which means CI does not cover private-key export; it is covered when the tests run on Windows.
 
 ## Not Verified
 
