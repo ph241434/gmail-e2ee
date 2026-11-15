@@ -126,6 +126,8 @@ In the demo page, the **Encrypt to** card supplies the main recipient and **Also
 
 To try it by hand, copy your public key with **Copy my public key**, import it with `gpg --import`, and paste any message from **Encrypted message (OpenPGP)** into `gpg --decrypt`.
 
+**Known issue: exported private keys and GnuPG 2.4.4.** GnuPG 2.4.4 as packaged in Ubuntu 24.04 imports a private key exported by this app but then rejects its passphrase ("Bad passphrase"), although it handles its own exported keys. GnuPG 2.4.7 (Windows) and 2.4.8 (Ubuntu 26.04) accept the same keys. The cause has not been found. Messages and public keys are not affected, and neither is importing a GnuPG key into this app. On 2.4.4 the test for this is marked as an expected failure and logs how the rejected key was protected.
+
 ## Chrome Extension
 
 The `extension/` folder packages the same code as a Manifest V3 Chrome extension. [docs/EXTENSION-DESIGN.md](docs/EXTENSION-DESIGN.md) describes the full design and its trust boundaries. So far it contains:
