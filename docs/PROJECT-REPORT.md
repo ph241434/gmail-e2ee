@@ -1,137 +1,134 @@
 # Gmail E2EE Project Report
 
-Prepared October 14, 2026. This report describes the source on `feature/persistent-contact-trust`.
-
-> **Update, November 9, 2026: OpenPGP prototype.** The branch `feature/openpgp-prototype` replaces the custom RSA message format described below with standard OpenPGP (OpenPGP.js 6.3.2, v4 Ed25519/Cv25519 keys). The identity vault keeps the PBKDF2 + AES-GCM sealing design, and contacts keep the trust, key-change and revision rules, now with one OpenPGP key per contact bound to its email. Messages are signed inside the encryption and always encrypted to the sender too. A test exchanges messages with a real GnuPG in both directions, and the full suite is 75 tests across six files. The README on that branch describes the new design, its settings and its limits. The rest of this report still describes the RSA baseline.
+Prepared November 14, 2026. This report describes the source on `feature/gmail-integration`, the last branch of the stack listed under [Branches and merge order](#branches-and-merge-order). It replaces the October 14 report, which described the earlier custom RSA design.
 
 ## Project Position
 
-The project is a working local cryptography and key-management proof of concept for a future Gmail encryption tool. It is not a Gmail extension or a deployed email service yet.
+The project is an educational end-to-end encryption tool for Gmail, built on standard OpenPGP. It has two front ends over one core:
 
-PR #3, covering the encrypted key vault and simplified interface, was merged into `main`. Local `main` was synchronized to merge commit `97ee73d23df283b8122c3c87ab660f5a32377d82`. Persistent contacts and trust are the next feature, developed separately from that merged baseline.
+- a web page (`npm run dev`) for managing keys and trying encryption by hand, and
+- a Chrome extension that adds encryption and decryption to the Gmail website.
 
-Phase 1's cryptographic foundation is complete. The Phase 2 foundation now includes public-key exchange, fingerprints, an encrypted private-key vault, a focused interface, and persistent contact trust with explicit key-change detection. Extension design and Gmail integration remain future work.
+Everything runs in the browser. There is no backend, no Google API or OAuth, and no key server.
+
+The core, the key manager and the extension's lock handling are complete and tested. The Gmail integration is complete and tested against a local page that copies Gmail's markup, **but it has not been run against the real Gmail website**. That manual check is the main piece of work left.
+
+It is not audited and is not suitable for protecting real secrets.
 
 ## How It Works
 
-The app runs in the browser using TypeScript, Vite, and the platform Web Crypto API. It has no application backend, OAuth connection, Gmail API integration, or remote key server. It does not send messages to Gmail.
+### Identity
 
-The demo keeps two separate private-key roles: Alice's RSA-OAEP recipient key unwraps message session keys; Pavel's RSA-PSS signing key signs outgoing packages. Contact selections supply the recipient encryption and sender verification public keys. Choosing an external recipient public key does not give this browser the corresponding private key, so a self-decrypt demo succeeds only when the selected keys match the local private keys.
+Each user has one OpenPGP v4 key: an Ed25519 primary key that signs and a Cv25519 subkey that decrypts, with a self-signed name and email. Version 4 keys are used because GnuPG does not support the newer v6 keys. OpenPGP.js 6.3.2 does the OpenPGP work; all its settings are pinned in `src/pgp/keys.ts`.
 
-### Sending A Message
+The private key is stored in IndexedDB, sealed with PBKDF2-HMAC-SHA-256 (600,000 iterations) and AES-256-GCM under the vault passphrase. Rotating the key keeps the old key in the vault as a retired key, so earlier mail stays readable. The identity can be backed up to a file, restored, exported for other OpenPGP software, or created from an existing OpenPGP key.
 
-1. The user creates or unlocks a private-key vault, or chooses temporary keys.
-2. The user chooses a recipient contact or imports a recipient public key and compares its fingerprint through a separate trusted channel.
-3. The UI requires verified trust for the exact active recipient fingerprint. For a saved contact it re-reads the stored key and trust before proceeding.
-4. The message is encoded as UTF-8 and encrypted with a fresh AES-256-GCM session key and random 96-bit nonce.
-5. The recipient RSA-OAEP public key wraps the session key.
-6. The local RSA-PSS private key signs a deterministic representation of the package version, wrapped session key, nonce, and ciphertext.
-7. The browser displays the resulting Base64 fields as an encrypted JSON package.
+### Contacts and trust
 
-### Reading A Message
+A contact is a name, an email and one OpenPGP public key. The email must be one of the key's self-signed addresses. A contact starts unverified; the user compares the fingerprint through a separate channel and records that. A changed key clears the verification, is flagged, and is recorded in a history that also keeps the replaced key. Writes are revision-checked so a stale tab cannot overwrite a newer decision.
 
-1. The user supplies or creates an encrypted package and selects the sender verification public key.
-2. The UI requires verified trust for that exact fingerprint and checks saved contact trust again when applicable.
-3. The crypto layer validates the package and verifies its RSA-PSS signature before decrypting anything.
-4. The local recipient private key unwraps the AES session key.
-5. AES-GCM authenticates and decrypts the ciphertext. Invalid signatures, wrong keys, or failed authentication produce errors instead of plaintext.
+Two rules decide what happens to a message:
 
-The current version-1 package contains `version`, `encryptedSessionKey`, `nonce`, `ciphertext`, and `signature`. Contact names and emails are not included in this signed format; they are local labels rather than authenticated email routing identities.
+- **Sending:** every recipient must be the user or a contact whose current key is verified. If any recipient is not, nothing is encrypted.
+- **Reading:** a message is shown only if it is signed by the user, a verified contact, or a contact key that was verified before it was replaced.
 
-## Key And Trust Management
+### Messages
 
-### Private-Key Vault
+A message is signed, then encrypted to every recipient and to the sender, and sent as standard armored OpenPGP text. Because the signature is inside the encryption, it cannot be stripped and replaced. A failed decryption reports why: not addressed to the reader, unsigned, signed by an unverified key, or damaged.
 
-The optional vault is stored in the browser's `gmail-e2ee` IndexedDB database. PBKDF2-HMAC-SHA-256 with 600,000 iterations and a fresh 128-bit salt derives an AES-256-GCM wrapping key from the user's passphrase. Each RSA private key is wrapped as PKCS#8 using its own random 96-bit IV. Authenticated additional data binds the wrapped key to its role, vault version, and public-key fingerprint.
+### The Chrome extension
 
-Only encrypted private keys, public keys, fingerprints, salt, IVs, and algorithm metadata are stored. The passphrase is not persisted. Vault creation temporarily needs extractable private keys for wrapping; the application receives unwrapped, non-extractable keys limited to signing or session-key unwrapping.
+The Gmail page is treated as untrusted: it belongs to the provider the tool protects content from, and it autosaves whatever is typed into it. So:
 
-The main control follows the vault state: Create vault, Unlock, Lock, or Clear temporary keys. Lock releases active private-key references, clears session trust and message fields, and retains encrypted storage. JavaScript does not provide a secure-memory-erasure guarantee. Replacement and deletion require confirmation.
+- The **content script** runs in the Gmail page with no keys and no plaintext. It finds encrypted messages and compose windows and places two frames.
+- The **reader frame** and **compose frame** are served from the extension's own origin, which page scripts cannot read. The message is typed and displayed only there. The page receives ciphertext and a frame height, nothing else.
+- The **popup**, drawn by Chrome itself, is where the vault passphrase is typed. The frames never ask for it.
+- The unlocked key is held in `chrome.storage.session` (memory only, hidden from content scripts) and locks after 60 minutes.
 
-### Contacts And Verification
-
-The separate `gmail-e2ee-contacts` database stores version-1 contact records. A contact has a stable ID, display name, normalized email, revision, timestamps, and up to two public-key roles: encryption and signature verification. Existing vaults require no schema migration.
-
-Saving a new contact never silently promotes session trust: each new role starts unverified. The verification checkbox records the user's comparison for the exact fingerprint and stores a verification timestamp. Selecting that saved contact on a later visit restores the saved decision for that same key. Unsaved keys continue to use session-only verification.
-
-Importing a different public key for a selected contact:
-
-1. Computes the fingerprint from imported canonical SPKI key material.
-2. Compares it with the currently saved key for that role.
-3. Records the old and new fingerprints, change time, and the old key's verification time when applicable.
-4. Marks the current key as changed and clears its verification.
-5. Shows a visible warning and disables the corresponding crypto action until the fingerprint is explicitly reverified.
-
-Reimporting the same material preserves trust. Reverting to an older key requires new verification. Adding or rotating one role does not verify or revoke the other role. Changing a contact's email clears both roles' verification; a display-name edit preserves their existing decisions.
-
-Updates and deletion compare record revisions within an IndexedDB write transaction, preventing a stale tab from overwriting a newer decision. Before using a saved contact, the UI re-reads its record and rejects a changed fingerprint, email identity, revoked decision, missing contact, or unreadable storage. Changes after that check are considered at the next operation; this is not a remote revocation service.
-
-Deleting a contact removes its keys, trust, and key-change history and clears its active bindings. Vault deletion and contact deletion are independent. New or removed contacts in another tab appear after a page refresh.
+[EXTENSION-DESIGN.md](EXTENSION-DESIGN.md) has the full design.
 
 ## Implemented Features
 
 | Area | Implemented |
 | --- | --- |
-| Message confidentiality | AES-256-GCM message-body encryption with a new session key and nonce per message |
-| Session-key protection | RSA-OAEP with SHA-256 |
-| Sender signatures | RSA-PSS with SHA-256 and deterministic package serialization |
-| Failure handling | Invalid package, tamper, wrong-key, signature, and authenticated-decryption failures |
-| Public-key exchange | Role-specific SPKI PEM import/export |
-| Fingerprints | SHA-256 over canonical SPKI, displayed as hexadecimal bytes |
-| Private-key persistence | Versioned, passphrase-protected local vault; unlock, lock, replace, delete |
-| Temporary demo mode | In-memory keys isolated from the saved vault |
-| Contacts | Local creation, selection, metadata editing, duplicate-email rejection, confirmed deletion |
-| Persistent trust | Per-role verified status and verification timestamps tied to the current fingerprint |
-| Key changes | Visible changed status, old/new fingerprint history, fresh verification requirement |
-| Concurrent updates | Atomic revision checks and a fresh saved-trust read before crypto use |
-| Interface | Compact key cards, state-aware vault control, collapsed PEM and package details |
-| CI | GitHub Actions on main pushes and pull requests, Node 22, npm ci, typecheck, tests, build |
+| Identity | One OpenPGP v4 key per user (Ed25519 + Cv25519), self-signed name and email |
+| Key storage | Passphrase-sealed vault in IndexedDB; lock, unlock, replace, delete |
+| Key rotation | New key for the same identity; retired keys kept for reading old mail |
+| Backup | Backup file and restore; private-key export to and import from other OpenPGP software |
+| Messages | Sign-then-encrypt to several recipients plus the sender; specific failure reasons |
+| Contacts | One key per contact bound to its email; verification, key-change detection, history with replaced keys |
+| Recipients | Address lists resolved against verified contacts; all-or-nothing |
+| Signers | Current verified keys and previously verified keys accepted; unverified keys refused |
+| Extension shell | Manifest V3, key manager page, unlock popup, shared lock state, auto-lock |
+| Gmail integration | Encrypt button and compose frame; encrypted messages decrypted in place; sender mismatch warning |
+| Interoperability | Messages and keys exchanged with GnuPG in both directions |
+| CI | Typecheck, unit tests, both builds, and browser tests on every pull request |
 
 ## Verification
 
-The suite contains 85 automated tests across seven files. It includes all 55 prior tests plus 30 contact and trust cases. Coverage includes new and existing keys, trust persistence, same-key normalization, rotation, return to an old key, independent roles, verification revocation, metadata edits, duplicate emails, stale writes, concurrent updates, malformed records, key/fingerprint substitution, inconsistent history, unavailable storage, deletion, and isolation from private-key storage.
-
-Local acceptance commands are `npm run typecheck`, `npm test`, and `npm run build`, in that order. The dependency audit is checked separately with `npm audit`. Browser checks cover creation, selection, reload persistence, verification, replacement-key warnings, reverification, encryption/decryption, and stale trust revoked from a second tab, with desktop and compact layout inspection.
-
-| Check | Result for this feature |
+| Check | Result |
 | --- | --- |
-| Typecheck | Passed |
-| Automated tests | 85 passed across seven files |
-| Production build | Passed |
-| Dependency audit | Zero reported vulnerabilities |
-| Browser workflows | Passed, including trust revocation from a second tab and contact deletion isolation |
-| Responsive layout | Desktop and compact layouts checked; expanded history fits at 320 pixels without horizontal overflow |
-| Browser console | No warnings or errors observed |
-| Merged main CI | Passed for `97ee73d23df283b8122c3c87ab660f5a32377d82` |
+| Typecheck | Passes |
+| Unit tests | 133 tests in 10 files pass |
+| Web page build, extension build | Pass |
+| Browser tests | 10 Playwright tests pass in Chromium with the built extension loaded |
+| GnuPG interoperability | Messages and public keys both ways, and importing a GnuPG private key, with GnuPG 2.4.7 (Windows) and 2.4.8 (Linux). Exporting a private key to GnuPG works with 2.4.7 only; see the open issue below |
 
-CI verifies these command-level checks; browser checks are currently performed during development rather than in an automated browser CI job.
+The browser tests use two separate browser profiles that exchange and verify keys and then write, send and read a message through `e2e/fake-gmail.html`. That page copies the Gmail markup the content script relies on, and records every window message and every change to its own compose box. The tests assert that the plaintext never appears in anything the page can see, and that page scripts cannot reach into the frames.
+
+Two things found during this work are worth knowing:
+
+- **GnuPG and text-like salts.** After a batch import, GnuPG 2.4.8 rejected an exported key with "Bad passphrase" whenever the key's random salt happened to look like text (9 of 9 such keys failed, 30 of 30 others worked, all else equal). The export now avoids such values. This removed one cause of failure, not all of them; see the open issue below.
+- **Clipped messages.** A browser test caught the page scan matching the wrong block when a clipped message was followed by a complete one. Each block is now matched from its own start marker.
+
+## Known Open Issue
+
+GnuPG 2.4.8 with libgcrypt 1.12.0, which is what Ubuntu 26.04 and the CI runner have, does not reliably accept a private key exported by this app. The same key file is accepted or rejected, with "Bad passphrase" or with "Bad secret key" for the encryption subkey, depending on things that have nothing to do with the key: the length of the path to GnuPG's home folder, whether another key was created there first, and whether the agent has a config file. The key files GnuPG stores are identical in the passing and failing cases. That points to a defect on the GnuPG side, but the cause has not been found. The same GnuPG handles keys it exported itself, which use different protection settings (AES-128 and SHA-1, where this app's export uses AES-256 and SHA-256). GnuPG 2.4.7 with libgcrypt 1.9.4, the copy in Git for Windows, accepts this app's keys.
+
+Only private-key export to that GnuPG build is affected. Messages, public keys, and importing a GnuPG key into this app all work there. Because the outcome is not stable, the test for exported keys is skipped on that build, which means CI does not cover private-key export; it is covered when the tests run on Windows.
+
+## Not Verified
+
+- **The real Gmail website.** Finding compose windows, reading recipients and inserting text rely on Gmail markup that Google can change. Reading relies only on the armored text. The README lists the manual check to do.
+- **File download and file picker flows** (backup download, restore, key export) were not driven by hand; their logic is unit-tested.
+- **Other browsers.** Only Chromium was tested.
 
 ## Remaining Work
 
 | Priority | Still needed | Purpose |
 | --- | --- | --- |
-| Next | Define encrypted subjects, attachments, and metadata rules | Establish exactly what future Gmail integration will protect and expose |
-| Next | Design the browser-extension architecture and isolation boundaries | Keep Gmail page content separate from sensitive key operations |
-| Next | Encrypted key backup and recovery | Avoid irreversible key loss when a browser profile or passphrase is lost |
-| Later | Deliberate key rotation and revocation protocol | Handle authenticated transitions and historical-key use across devices |
-| Later | Retain and select historical public keys | Verify older signed messages after contact key rotation |
-| Later | Gmail compose/read integration and packaging | Encrypt before Gmail receives content and decrypt on the endpoint |
-| Later | Key discovery, identity binding, and multi-device synchronization | Exchange keys and decisions without treating imports as identity proof |
-| Later | Automated browser regression tests in CI | Continuously verify persistence, accessibility, and complete user workflows |
-| Before production use | Independent security review and operational hardening | Review the overall protocol, dependencies, extension permissions, recovery, and deployment |
+| Next | Run the extension in real Gmail and adjust `extension/content/gmailDom.ts` | Confirm the integration against the real site |
+| Next | Toolbar icon | Chrome currently shows its default |
+| Later | PGP/MIME with protected headers | Encrypt subjects; handle attachments and HTML bodies |
+| Later | Key discovery (WKD) | Find contact keys without manual exchange |
+| Later | Revocation on rotation; contacts in backups | Tell others a key is retired; restore trust decisions |
+| Later | Reply quoting in the compose frame | Usability |
+| Before any real use | Independent security review | The protocol choices, the extension boundary, and the OpenPGP.js dependency |
 
 ## Practical Limits
 
-- This is an educational proof of concept, not audited production encryption software.
-- The private-key vault protects stored private keys, but an attacker able to execute code on this origin can capture passphrases or use unlocked keys.
-- Contacts contain public keys but also names, emails, timestamps, and trust decisions. These are stored unencrypted and are not protected by the vault passphrase.
-- Contact trust records and local history are not signed or tamper-proof against a malicious local user or compromised origin. Structural and fingerprint checks do not prevent coordinated malicious edits to an entire record.
-- Verification records a user's trusted-channel fingerprint comparison. It does not validate email ownership automatically.
-- There is no passphrase recovery, key backup, hardware-backed storage integration, or synchronization yet. Clearing browser data can permanently remove keys and contacts.
-- Key-change history stores fingerprints rather than old public-key material. Historical-message verification and automated revocation are not implemented.
-- Message bodies are protected. Subjects, attachments, sender/recipient addresses, timestamps, message sizes, and routing metadata have not been integrated into an encrypted email design.
-- All storage is tied to the browser profile and exact origin, including its port. A vault or contact saved on port 5176 is separate from one on port 5175.
+- Educational software, not audited.
+- While unlocked, the private key exists as bytes in JavaScript memory and in Chrome's session storage. A compromised browser, or another extension with broad permissions, can defeat everything here.
+- Gmail still sees sender, recipients, subject, timing and size. Recipient key IDs are visible in every message.
+- The Gmail page can cover or imitate the extension's frames, though it cannot read them.
+- OpenPGP.js does not record who a signed message was meant for, so a recipient can re-encrypt a signed message to someone else with the signature intact.
+- Fingerprint verification is only as good as the channel used to compare fingerprints.
+- A forgotten vault passphrase cannot be recovered.
+- The OpenPGP.js dependency must be kept patched.
+
+## Branches and Merge Order
+
+The work is a stack of pull requests, each based on the one before. Merge them in this order; GitHub retargets each to `main` as the one below it merges.
+
+| PR | Branch | Adds |
+| --- | --- | --- |
+| #4 | `feature/persistent-contact-trust` | Persistent contacts and key-change detection (RSA baseline) |
+| #5 | `feature/openpgp-prototype` | OpenPGP replaces the custom RSA format |
+| #6 | `feature/recipients-and-key-history` | Several recipients, key rotation, retired keys |
+| #7 | `feature/identity-backup` | Backup, restore, key export and import |
+| #8 | `feature/extension-scaffold` | Extension design and skeleton, browser tests |
+| #9 | `feature/gmail-integration` | Gmail compose and read integration |
 
 ## Where To Look In The Source
 
-`src/crypto` contains the Web Crypto wrappers, public-key serialization, fingerprints, and encrypted vault. `src/message` defines the signed package and its deterministic serialization. `src/contacts/contact.ts` defines contact data and validation. `src/storage/contactStorage.ts` implements persistence and trust transitions. `src/ui/contactController.ts` connects saved contacts to the existing key session and UI. `src/main.ts` coordinates the user workflow. The `tests` directory contains the automated cases.
+`src/pgp` holds keys, the vault, backup and messages. `src/contacts` holds the contact model and the recipient and signer rules. `src/storage` is IndexedDB. `src/ui` and `src/main.ts` are the key manager page. `extension` is the Chrome extension, with everything that depends on Gmail's markup in `extension/content/gmailDom.ts`. `tests` are unit tests and `e2e` are browser tests.

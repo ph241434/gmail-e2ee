@@ -46,3 +46,4 @@ dist-extension/
 # Playwright output
 test-results/
 playwright-report/
+dist-extension-e2e/

@@ -18,11 +18,12 @@ Implemented:
 - the contact email must be one of the key's self-signed user IDs
 - replaced contact keys are kept, so mail signed with a previously verified key can still be checked
 - tested round trips with a real GnuPG in both directions
-- a Chrome extension skeleton: key manager page, toolbar popup for unlock and lock, shared lock state, auto-lock
-- 116 unit tests, plus browser tests that load the built extension into Chromium
+- a Chrome extension with a key manager page, a toolbar popup for unlock and lock, shared lock state, and auto-lock
+- Gmail integration in the extension: an Encrypt button on compose windows, and encrypted messages decrypted in place, with plaintext kept out of the Gmail page
+- 133 unit tests, plus 10 browser tests that load the built extension into Chromium
 
 Not yet implemented:
-- Gmail integration (the extension does not touch Gmail yet)
+- a check against the real Gmail website (see "What has and has not been tested" below)
 - PGP/MIME (subjects, attachments), key discovery (WKD)
 
 This is an educational end-to-end encryption proof of concept intended to eventually integrate with Gmail. It deliberately stays local: no Google APIs, OAuth flow, or key server.
@@ -130,14 +131,26 @@ To try it by hand, copy your public key with **Copy my public key**, import it w
 
 ## Chrome Extension
 
-The `extension/` folder packages the same code as a Manifest V3 Chrome extension. [docs/EXTENSION-DESIGN.md](docs/EXTENSION-DESIGN.md) describes the full design and its trust boundaries. So far it contains:
+The `extension/` folder packages the same code as a Manifest V3 Chrome extension. [docs/EXTENSION-DESIGN.md](docs/EXTENSION-DESIGN.md) describes the full design and its trust boundaries. It contains:
 
 - **Key manager** (`options.html`): this app, opened automatically when the extension is installed.
 - **Popup** (`popup.html`): shows whether the identity is locked, and unlocks or locks it. Chrome draws the popup itself, so it is the place to type the vault passphrase.
 - **Shared lock state** (`extension/session.ts`): the unlocked identity is kept in `chrome.storage.session`, which Chrome holds in memory only, clears when the browser closes, and hides from content scripts. Locking in one place locks everywhere.
 - **Background worker** (`background.ts`): never handles keys or plaintext. It locks the identity 60 minutes after it was unlocked.
 
-It requests only the `storage` and `alarms` permissions. Its pages allow no inline or remote scripts.
+- **Content script** (`content/gmail.ts`): runs in the Gmail page with no keys and no plaintext. It finds armored messages and compose boxes, places the two frames below, and inserts finished armored text.
+- **Reader frame** (`viewer.html`): replaces each encrypted message. It decrypts with your current and retired keys and requires a signature from you, a verified contact, or a contact key you verified before it was replaced. It says who signed, and warns if that is not the sender Gmail displays. Unsigned, unverified, tampered or misaddressed messages show an explanation and no text.
+- **Compose frame** (`compose.html`): opened by the **Encrypt with Gmail E2EE** button, in place of Gmail's own editor. You type the message there; recipients are pre-filled from To and CC and must all be verified contacts. Only the armored result is handed to the page, and you send it with Gmail's Send button.
+
+The Gmail page is treated as untrusted: it autosaves whatever is typed into it, so the message is typed only in a frame on the extension's own origin, which page scripts cannot read. The frames never ask for the vault passphrase; they offer a button that opens the extension's own unlock window.
+
+It requests only the `storage` and `alarms` permissions, and runs only on `https://mail.google.com`. Its pages allow no inline or remote scripts and can be framed only by Gmail.
+
+### What has and has not been tested
+
+The browser tests run the real extension code in Chromium against `e2e/fake-gmail.html`, a local page that copies the parts of Gmail's markup the content script relies on and also records everything a hostile page could observe. They cover writing, sending, reading as recipient and as sender, locking, unknown and unverified recipients, a mismatched sender, an unverified signer, several message layouts, a clipped message, and a tampered message, and they check that the plaintext never appears in anything the page can see.
+
+**The extension has not been run against the real Gmail website.** Gmail's markup is not a stable interface, so the first run in real Gmail needs a manual check that the Encrypt button appears, recipients are pre-filled, the armored text lands in the message body, and received messages are replaced by the reader. Reading depends only on the armored text itself, so it is the least likely part to need adjusting. If the recipient lookup fails, the recipients can be typed in the compose frame.
 
 To try it:
 
@@ -145,7 +158,10 @@ To try it:
 npm run build:extension
 ```
 
-Then open `chrome://extensions`, turn on **Developer mode**, choose **Load unpacked**, and select the `dist-extension` folder.
+1. Open `chrome://extensions`, turn on **Developer mode**, choose **Load unpacked**, and select the `dist-extension` folder. The key manager opens.
+2. Create your identity, then import and verify the public key of someone to write to. They need an OpenPGP key too, from this extension or from GnuPG, Thunderbird, Proton or similar, and they need your public key.
+3. Open Gmail and start a message to them. Select **Encrypt with Gmail E2EE**, type the message in the frame, and select **Encrypt and insert**. Send as usual.
+4. An encrypted message you open in Gmail is replaced by the decrypted text and the name of who signed it.
 
 ## Threat Model
 
@@ -163,7 +179,10 @@ This does not hide sender and recipient addresses, timestamps, message size, rou
 - There is no passphrase recovery and no automatic sync between devices. A backup file or exported key must be moved by hand, and each is only as strong as its passphrase. Replacing or deleting the vault without a backup makes every message encrypted to it unreadable. Rotating the key does not.
 - Contacts and their trust decisions are not part of a backup.
 - Rotation does not publish a revocation for the old key, and contacts learn about the new key only when you send it to them.
-- Messages are plain text. Subjects, attachments and HTML bodies are not handled yet.
+- Messages are plain text. Subjects, attachments and HTML bodies are not handled yet. In Gmail, the subject line and every other header stay visible to Google.
+- The Gmail page decides where the extension's frames appear and can cover or imitate them, though it cannot read them.
+- In Gmail, only To and CC recipients are read. BCC recipients are not encrypted to.
+- Replies do not quote the decrypted text, and a reader already showing a message is not refreshed when a contact's verification changes.
 - The OpenPGP.js dependency must be kept up to date. Version 6.1.1, for example, fixed a signature-spoofing flaw (CVE-2025-47934).
 - Storage is tied to the browser profile and exact origin, including the port.
 
@@ -200,8 +219,14 @@ extension/
   session.ts                    unlocked identity shared through chrome.storage.session
   options.html, options.ts      key manager (this app)
   popup.html, popup.ts          lock state, unlock, lock
-scripts/build-extension.mjs     builds dist-extension/
-e2e/                            browser tests that load the built extension
+  protocol.ts                   messages between the Gmail page and the frames
+  frame.ts                      plumbing shared by the two frames
+  viewer.html, viewer.ts        reader frame
+  compose.html, compose.ts      compose frame
+  content/gmail.ts              content script for the Gmail page
+  content/gmailDom.ts           everything that depends on Gmail's markup
+scripts/build-extension.mjs     builds dist-extension/ (and the browser-test variant)
+e2e/                            browser tests, and the stand-in Gmail page they use
 src/
   contacts/
     contact.ts                  contact model, validation, key/email binding
@@ -224,6 +249,7 @@ src/
   main.ts                       page layout and workflow
 tests/
   contacts.test.ts
+  extensionProtocol.test.ts
   extensionSession.test.ts
   gpgInterop.test.ts
   identityBackup.test.ts
@@ -238,4 +264,5 @@ tests/
 
 - PGP/MIME (RFC 3156) with protected headers, so subjects and attachments are covered.
 - Key discovery through WKD.
-- Gmail compose and read integration in the extension, as designed in docs/EXTENSION-DESIGN.md.
+- Check and adjust the extension against the real Gmail website.
+- A toolbar icon, and attachments as separate encrypted files.

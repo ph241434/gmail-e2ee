@@ -4,3 +4,19 @@
 .popup-form { display: grid; gap: 8px; margin-top: 12px; }
 .popup .button-row { margin-top: 14px; }
 .popup .identity-summary { margin-top: 4px; }
+
+/* Reader and compose frames, shown inside the Gmail page. */
+.frame-body { background: #fff; }
+.frame { padding: 10px 12px 12px; }
+.frame-status { color: #52606a; font-size: 0.82rem; font-weight: 600; overflow-wrap: anywhere; }
+.frame-status[data-mode="ok"] { color: #19583e; }
+.frame-status[data-mode="error"] { color: #903a20; }
+.frame-warning { margin-top: 6px; color: #903a20; font-size: 0.82rem; font-weight: 600; overflow-wrap: anywhere; }
+.frame-text { margin: 10px 0 0; color: #232a30; font: inherit; font-size: 0.92rem; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
+.frame button { margin-top: 10px; }
+.frame-problems { margin: 8px 0 0; padding-left: 18px; color: #903a20; font-size: 0.82rem; }
+.compose-form { display: grid; margin-top: 8px; }
+.compose-form label { margin-top: 8px; }
+.compose-form input[type="text"] { width: 100%; }
+.compose-form textarea { min-height: 150px; }
+.compose-form .button-row button { flex: 0 1 180px; }
