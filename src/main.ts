@@ -7,6 +7,7 @@ import {
   unlockIdentityVault,
   getDecryptionKeys,
   rotateIdentityVault,
+  releaseIdentity,
   type IdentityVault,
   type UnlockedIdentity
 } from "./pgp/identityVault";
@@ -19,6 +20,7 @@ import { deleteIdentityVault, loadIdentityVault, saveIdentityVault } from "./sto
 import { isPublicKeyVerified } from "./trust/publicKeyTrust";
 import { getVaultView, KeySession, type ActiveKeySource } from "./ui/keySession";
 import { ContactController } from "./ui/contactController";
+import { getSessionBridge } from "./ui/sessionBridge";
 
 const TEMPORARY_IDENTITY = { name: "Temporary identity", email: "temporary@example.invalid" };
 
@@ -381,6 +383,7 @@ deleteVaultButton.addEventListener("click", async () => {
   if (isBusy || !vaultExists || !await confirmVaultAction("delete")) return;
   await runOperation("Deleting vault...", async () => {
     await deleteIdentityVault();
+    await getSessionBridge().clear();
     vaultExists = false;
     if (session.source === "vault") clearActiveKeys();
     advancedOptions.open = false;
@@ -550,8 +553,17 @@ function confirmAction(title: string, message: string, label = "Delete contact")
   });
 }
 
-function activateIdentity(identity: UnlockedIdentity, source: ActiveKeySource): void {
+/**
+ * Makes an identity active on this page. Unless `share` is false, a saved identity is
+ * also shared with the app's other pages; a temporary one never is, and locks them.
+ */
+function activateIdentity(identity: UnlockedIdentity, source: ActiveKeySource, share = true): void {
   session.activate(identity, source);
+  if (share) {
+    const bridge = getSessionBridge();
+    void (source === "vault" ? bridge.save(identity) : bridge.clear())
+      .catch(() => setStatus("Unlocked here, but other windows could not be updated."));
+  }
   contactController.resetBindings();
   for (const card of cards) card.keyInput.value = identity.publicKey.armoredKey;
   encryptedPackageInput.value = "";
@@ -561,8 +573,9 @@ function activateIdentity(identity: UnlockedIdentity, source: ActiveKeySource): 
   renderControls();
 }
 
-function clearActiveKeys(): void {
+function clearActiveKeys(share = true): void {
   session.clear();
+  if (share) void getSessionBridge().clear().catch(() => setStatus("Locked here, but other windows could not be updated."));
   contactController.resetBindings();
   plaintextInput.value = "";
   encryptedPackageInput.value = "";
@@ -735,6 +748,41 @@ async function initializeVault(): Promise<void> {
     setStatus(formatError(error));
   }
   renderControls();
+  await syncSharedIdentity();
+  getSessionBridge().subscribe(() => void syncSharedIdentity());
+}
+
+/**
+ * Follows a lock or unlock made in another window of the app (for the extension: the
+ * toolbar popup, or the auto-lock timer). Does nothing in the plain web page.
+ */
+async function syncSharedIdentity(): Promise<void> {
+  if (isBusy) {
+    setTimeout(() => void syncSharedIdentity(), 500);
+    return;
+  }
+  let shared: UnlockedIdentity | undefined;
+  try {
+    shared = await getSessionBridge().load();
+  } catch {
+    return;
+  }
+  const active = session.source === "vault" ? session.identity : undefined;
+  if (!shared) {
+    if (active) {
+      clearActiveKeys(false);
+      setStatus("Locked from another window.");
+    }
+    return;
+  }
+  const unchanged = active?.publicKey.fingerprint === shared.publicKey.fingerprint &&
+    active.retiredKeys.length === shared.retiredKeys.length;
+  if (unchanged || session.source === "ephemeral") {
+    releaseIdentity(shared);
+    return;
+  }
+  activateIdentity(shared, "vault", false);
+  setStatus("Unlocked from another window.");
 }
 
 renderTrust();
